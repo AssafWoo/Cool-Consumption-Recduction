@@ -86,18 +86,25 @@ fn init() -> anyhow::Result<()> {
     // Write ccr-rewrite.sh
     std::fs::create_dir_all(&hooks_dir)?;
     let rewrite_script_path = hooks_dir.join("ccr-rewrite.sh");
-    let rewrite_script = r#"#!/usr/bin/env bash
+    // Resolve the binary path for use inside the hook script and settings.json.
+    // Prefer the same binary that is currently running; fall back to PATH lookup.
+    let ccr_bin = std::env::current_exe()
+        .ok()
+        .unwrap_or_else(|| std::path::PathBuf::from("ccr"));
+    let ccr_bin_str = ccr_bin.to_string_lossy();
+
+    let rewrite_script = format!(r#"#!/usr/bin/env bash
 INPUT=$(cat)
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 [ -z "$CMD" ] && exit 0
-REWRITTEN=$(ccr rewrite "$CMD" 2>/dev/null) || exit 0
+REWRITTEN=$("{ccr_bin_str}" rewrite "$CMD" 2>/dev/null) || exit 0
 [ "$CMD" = "$REWRITTEN" ] && exit 0
 ORIGINAL_INPUT=$(echo "$INPUT" | jq -c '.tool_input')
 UPDATED_INPUT=$(echo "$ORIGINAL_INPUT" | jq --arg cmd "$REWRITTEN" '.command = $cmd')
 jq -n --argjson updated "$UPDATED_INPUT" \
-  '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow",
-    "permissionDecisionReason":"CCR auto-rewrite","updatedInput":$updated}}'
-"#;
+  '{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"allow",
+    "permissionDecisionReason":"CCR auto-rewrite","updatedInput":$updated}}}}'
+"#, ccr_bin_str = ccr_bin_str);
     std::fs::write(&rewrite_script_path, rewrite_script)?;
     // chmod +x
     #[cfg(unix)]
@@ -116,30 +123,62 @@ jq -n --argjson updated "$UPDATED_INPUT" \
         serde_json::json!({})
     };
 
-    // PostToolUse hook (existing)
-    let post_hook_entry = serde_json::json!({
-        "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "ccr hook" }]
-    });
+    let ccr_hook_cmd = format!("{} hook", ccr_bin_str);
+    let ccr_rewrite_cmd = rewrite_script_path.to_string_lossy().to_string();
 
-    // PreToolUse hook (new)
-    let pre_hook_entry = serde_json::json!({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": rewrite_script_path.to_string_lossy()
-        }]
-    });
-
-    settings["hooks"]["PostToolUse"] = serde_json::json!([post_hook_entry]);
-    settings["hooks"]["PreToolUse"] = serde_json::json!([pre_hook_entry]);
+    // Merge CCR entries into existing hook arrays rather than overwriting them.
+    // This preserves hooks from other tools (e.g. RTK).
+    merge_hook(&mut settings, "PostToolUse", "Bash", &ccr_hook_cmd);
+    merge_hook(&mut settings, "PreToolUse",  "Bash", &ccr_rewrite_cmd);
 
     let parent = settings_path.parent().unwrap();
     std::fs::create_dir_all(parent)?;
     std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
 
     println!("CCR hooks installed:");
-    println!("  PostToolUse: ccr hook → {}", settings_path.display());
-    println!("  PreToolUse:  {} → {}", rewrite_script_path.display(), settings_path.display());
+    println!("  PostToolUse: {} → {}", ccr_hook_cmd, settings_path.display());
+    println!("  PreToolUse:  {} → {}", ccr_rewrite_cmd, settings_path.display());
     Ok(())
+}
+
+/// Add a hook command to an existing hook-event array without removing other entries.
+/// If an entry for `matcher` already contains `command`, it is not duplicated.
+fn merge_hook(settings: &mut serde_json::Value, event: &str, matcher: &str, command: &str) {
+    let arr = settings["hooks"][event]
+        .as_array_mut()
+        .map(|a| std::mem::take(a))
+        .unwrap_or_default();
+
+    let new_hook = serde_json::json!({ "type": "command", "command": command });
+
+    // Find an existing entry for this matcher and append to its hooks list,
+    // or insert a new entry if none exists.
+    let mut found = false;
+    let mut updated: Vec<serde_json::Value> = arr
+        .into_iter()
+        .map(|mut entry| {
+            if entry.get("matcher").and_then(|m| m.as_str()) == Some(matcher) {
+                let hooks = entry["hooks"].as_array_mut();
+                if let Some(hooks) = hooks {
+                    let already = hooks.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()) == Some(command)
+                    });
+                    if !already {
+                        hooks.push(new_hook.clone());
+                    }
+                }
+                found = true;
+            }
+            entry
+        })
+        .collect();
+
+    if !found {
+        updated.push(serde_json::json!({
+            "matcher": matcher,
+            "hooks": [new_hook]
+        }));
+    }
+
+    settings["hooks"][event] = serde_json::Value::Array(updated);
 }
