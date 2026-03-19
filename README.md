@@ -49,10 +49,12 @@ Claude issues: some-unknown-tool
 - **Entropy-adjusted budget** — uniform/repetitive output (npm install, progress bars) gets a tight budget automatically; diverse output gets the full budget
 - **Contextual anchoring** — error lines keep their nearest semantic neighbors (function signatures, file pointers) for immediate context
 - **Zero-shot noise classifier** — prototype embeddings score each line as useful vs boilerplate before anomaly ranking
-- **Semantic delta compression** — repeated commands (cargo build N times) emit only new/changed lines + `[X lines same as turn N]`
+- **Semantic delta compression** — repeated commands (cargo build N times) emit only new/changed lines + `[Δ from turn N: +M new, K repeated — ~T tokens saved]`; subcommand-aware keys keep `git status` and `git log` histories separate; state commands (`git`, `kubectl`, …) store full content for accurate diff beyond 4 KB
 - **Per-command historical centroid** — anomaly scored against what this command *usually* produces, so truly new output is surfaced aggressively
 - **Session output cache** — identical tool outputs across turns replaced with a single reference line
-- **Session-aware compression** — budget tightens as context fills; sentence-level cross-turn dedup via ccr-sdk
+- **Elastic Context (EC)** — pipeline tightens dynamically as the session fills: pressure ramps 0→1 between 25k–80k cumulative output tokens, shrinking BERT threshold and head/tail budget; critical pressure (>80%) appends a warning and suggests `ccr gain`
+- **Zoom-In (ZI)** — collapsed/omitted markers embed `ZI_N` IDs; run `ccr expand ZI_1` to retrieve the original lines without re-running the command
+- **Session-aware compression** — sentence-level cross-turn dedup via ccr-sdk
 - **Conversation compression** (ccr-sdk) — 10–20% savings per turn that compound across a long session
 
 ---
@@ -243,6 +245,26 @@ ccr filter [--command <hint>]
 
 Reads stdin, runs the four-stage pipeline, writes to stdout. Useful for piping arbitrary output: `cargo clippy 2>&1 | ccr filter --command cargo`.
 
+### ccr expand
+
+```
+ccr expand [ZI_N | --list]
+```
+
+Retrieve original lines that were collapsed or omitted in a previous CCR run. Each compressed marker embeds an ID (e.g. `ZI_3`):
+
+```
+[5 lines collapsed — ccr expand ZI_3]
+[... 42 lines omitted — ccr expand ZI_3 ...]
+```
+
+```bash
+ccr expand ZI_3       # print the original lines
+ccr expand --list     # list all available IDs in this session
+```
+
+Blocks are stored per-session at `~/.local/share/ccr/expand/<session_id>/ZI_N.txt`.
+
 ### ccr proxy
 
 Execute raw (no filtering), record analytics as a baseline. Writes a `_proxy.log` tee file.
@@ -371,15 +393,20 @@ This surfaces lines that are both informative (outliers) and relevant to what Cl
 
 Before emitting output, the hook runs ccr-sdk's sentence deduplicator against the 8 most recent session entries. Sentences that repeat earlier content are replaced with `[covered in turn N]`.
 
+### EC: Elastic Context
+
+As cumulative session tokens grow, `ccr hook` tightens the full pipeline — not just the output budget:
+
+| Session tokens | Pressure | Effect |
+|---------------|----------|--------|
+| < 25k | 0.0 | No change |
+| 25k–80k | 0.0 → 1.0 | BERT threshold and head/tail budget scale linearly |
+| > 80k | 1.0 | Max pressure: threshold ≤25% of configured value (min 30 lines), budget ≤40% (min 4 lines each) |
+| > 80% pressure | warning | Appends `[⚠ context near full — output compressed aggressively; run ccr gain to review]` |
+
 ### C2: Session-aware compression budget
 
-As cumulative session tokens grow, `ccr hook` tightens the line budget passed to the BERT summarizer:
-
-| Session tokens | Compression factor | Effect |
-|---------------|-------------------|--------|
-| < 50k | 1.0 | No extra compression |
-| 50k–100k | 1.0 → 0.5 | Budget scales linearly |
-| > 100k | 0.5 | Max compression (50% of lines) |
+On top of EC, `ccr hook` applies a second-pass budget to the already-compressed output when the session is token-heavy (compression_factor < 0.90). Historical per-command centroid is used for this pass when available.
 
 ---
 
@@ -505,11 +532,14 @@ Multiple PreToolUse hooks run in order — CCR merges into the existing array, p
 `ccr hook` receives output JSON after any Bash call. Pipeline:
 
 1. Extract `tool_response.output` (or error)
-2. Run 4-stage BERT pipeline with command string as query (B2 biasing)
-3. Apply sentence-level cross-turn dedup via ccr-sdk (C1)
-4. If session is token-heavy, apply extra BERT compression (C2)
-5. Embed output, record to session cache (B3)
-6. Return `{ "output": "<filtered>" }`
+2. Compute session `context_pressure()` → adjust pipeline config (EC)
+3. Enable Zoom-In (ZI); run 4-stage BERT pipeline with command string as query (B2 biasing)
+4. Persist zoom blocks to `~/.local/share/ccr/expand/` (ZI)
+5. Apply delta compression against prior runs of same subcommand key (SD)
+6. Apply sentence-level cross-turn dedup via ccr-sdk (C1)
+7. If session is token-heavy, apply extra BERT compression (C2)
+8. Embed output, update per-command centroid, record to session cache (B3)
+9. Return `{ "output": "<filtered>" }`
 
 Never fails — returns nothing on any error so Claude Code always sees a result.
 
@@ -556,11 +586,13 @@ Never fails — returns nothing on any error so Claude Code always sees a result
 ```
 ccr/                     CLI binary
   src/main.rs            Commands enum, init() with merge_hook()
-  src/hook.rs            PostToolUse: B2 query-biased BERT, C1 sentence dedup,
-                         C2 session budget, B3 cache record (JSON in → JSON out)
-  src/session.rs         Per-session state: output cache, compression budget,
-                         cross-turn dedup context (CCR_SESSION_ID=$PPID)
-  src/cmd/               filter, run (B3 cache check), proxy, rewrite, gain, discover
+  src/hook.rs            PostToolUse: EC pressure, ZI enable, B2 query-biased BERT,
+                         SD delta, C1 sentence dedup, C2 budget, B3 cache record
+  src/session.rs         Per-session state: output cache, context_pressure (EC),
+                         compression budget, subcommand-aware delta keys (SD),
+                         state_content full storage, cross-turn dedup context
+  src/zoom_store.rs      ZI block persistence: save_blocks / load_block / list_blocks
+  src/cmd/               filter, run, proxy, rewrite, gain, discover, expand (ZI)
   src/handlers/          31 handlers: cargo, git, curl, docker, npm, ls, read,
                          grep, find, tsc, vitest, jest, eslint, pytest, pip,
                          python, kubectl, gh, terraform, aws, make, go, maven,
@@ -570,13 +602,14 @@ ccr/                     CLI binary
 
 ccr-core/                Core library (no I/O)
   src/pipeline.rs        ANSI strip → normalize → patterns → BERT summarize
-                         (process() accepts optional query for B2 biasing)
+                         (process() accepts optional query for B2; returns zoom_blocks)
+  src/zoom.rs            Thread-local ZI accumulator: enable/disable/register/drain
   src/summarizer.rs      fastembed AllMiniLML6V2, OnceCell model cache;
                          anomaly scoring, clustering, intent-aware query,
                          entropy budget, contextual anchoring, noise classifier,
                          delta compression, historical-centroid scoring
   src/analytics.rs       Analytics struct (command, subcommand, duration_ms)
-  src/config.rs          CcrConfig, GlobalConfig, TeeConfig, FilterAction
+  src/config.rs          CcrConfig, GlobalConfig (with_pressure EC), TeeConfig, FilterAction
   src/tokens.rs          tiktoken cl100k_base
 
 ccr-sdk/                 Conversation compression
