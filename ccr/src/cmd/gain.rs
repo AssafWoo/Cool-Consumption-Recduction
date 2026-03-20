@@ -2,9 +2,43 @@ use anyhow::Result;
 use ccr_core::analytics::Analytics;
 use std::collections::BTreeMap;
 
-/// Claude Sonnet 4.6 input token price, used for cost estimates.
-/// Users on different models will see slightly different actuals, but this is a reasonable default.
-const PRICE_PER_TOKEN: f64 = 3.00 / 1_000_000.0; // $3.00 / 1M tokens
+/// Pricing table for known Anthropic model families (input tokens, $/1M).
+const MODEL_PRICES: &[(&str, f64)] = &[
+    ("claude-opus-4",     15.00),
+    ("claude-opus-3",     15.00),
+    ("claude-sonnet-4",    3.00),
+    ("claude-sonnet-3-7",  3.00),
+    ("claude-sonnet-3-5",  3.00),
+    ("claude-haiku-4",     0.80),
+    ("claude-haiku-3",     0.25),
+];
+
+/// Resolve the price per token to use for cost estimates.
+/// Priority: config override → ANTHROPIC_MODEL env var → $3.00 fallback.
+fn resolve_price() -> (f64, String) {
+    // 1. Config override
+    if let Ok(cfg) = crate::config_loader::load_config() {
+        if let Some(price) = cfg.global.cost_per_million_tokens {
+            return (price / 1_000_000.0, format!("${:.2}/1M (config)", price));
+        }
+    }
+
+    // 2. Auto-detect from ANTHROPIC_MODEL env var
+    if let Ok(model) = std::env::var("ANTHROPIC_MODEL") {
+        let model_lc = model.to_lowercase();
+        for (prefix, price) in MODEL_PRICES {
+            if model_lc.contains(prefix) {
+                return (
+                    price / 1_000_000.0,
+                    format!("${:.2}/1M ({})", price, model),
+                );
+            }
+        }
+    }
+
+    // 3. Fallback: Sonnet 4.6
+    (3.00 / 1_000_000.0, "$3.00/1M (Sonnet 4.6 default — set ANTHROPIC_MODEL or cost_per_million_tokens in ccr.toml to adjust)".to_string())
+}
 
 pub fn run(history: bool, days: u32) -> Result<()> {
     let records = load_records()?;
@@ -46,7 +80,8 @@ fn print_summary(records: &[Analytics]) {
     let total_output: usize = records.iter().map(|r| r.output_tokens).sum();
     let total_saved = total_input.saturating_sub(total_output);
     let overall_pct = savings_pct(total_input, total_output);
-    let cost_saved = total_saved as f64 * PRICE_PER_TOKEN;
+    let (price_per_token, price_label) = resolve_price();
+    let cost_saved = total_saved as f64 * price_per_token;
 
     let now_secs = now_unix();
     let today_start = day_start(now_secs);
@@ -71,8 +106,9 @@ fn print_summary(records: &[Analytics]) {
         overall_pct
     );
     println!(
-        "  Cost saved:     ~{}  (at $3.00/1M input tokens)",
-        fmt_cost(cost_saved)
+        "  Cost saved:     ~{}  (at {})",
+        fmt_cost(cost_saved),
+        price_label
     );
 
     if !today.is_empty() {
@@ -165,6 +201,7 @@ fn print_summary(records: &[Analytics]) {
 // ─── History view (--history) ─────────────────────────────────────────────────
 
 fn print_history(records: &[Analytics], days: u32) {
+    let (price_per_token, _) = resolve_price();
     let now_secs = now_unix();
     let cutoff = now_secs.saturating_sub(days as u64 * 86400);
 
@@ -208,7 +245,7 @@ fn print_history(records: &[Analytics], days: u32) {
 
     for (day, stats) in &rows {
         let pct = savings_pct(stats.input, stats.output);
-        let cost = stats.saved() as f64 * PRICE_PER_TOKEN;
+        let cost = stats.saved() as f64 * price_per_token;
         let saved_str = if stats.count == 0 {
             "—".to_string()
         } else {
@@ -235,7 +272,7 @@ fn print_history(records: &[Analytics], days: u32) {
 
     println!("{}", sep);
     let total_saved = total_input.saturating_sub(total_output);
-    let total_cost = total_saved as f64 * PRICE_PER_TOKEN;
+    let total_cost = total_saved as f64 * price_per_token;
     println!(
         "{:<12}  {:>5}  {:>12}  {:>8}  {:>10}",
         format!("{}-day total", days),

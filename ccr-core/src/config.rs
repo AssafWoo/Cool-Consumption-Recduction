@@ -61,6 +61,12 @@ pub struct GlobalConfig {
     /// enabling accurate line-level delta across long state outputs.
     #[serde(default = "default_state_commands")]
     pub state_commands: Vec<String>,
+    /// Override the cost per million input tokens used in `ccr gain`.
+    /// If unset, CCR auto-detects from the ANTHROPIC_MODEL env var,
+    /// falling back to $3.00/1M (Claude Sonnet 4.6).
+    /// Example: cost_per_million_tokens = 15.0  # for Opus
+    #[serde(default)]
+    pub cost_per_million_tokens: Option<f64>,
 }
 
 fn default_bert_model() -> String {
@@ -86,6 +92,7 @@ impl Default for GlobalConfig {
             hard_keep_patterns: Vec::new(),
             bert_model: default_bert_model(),
             state_commands: default_state_commands(),
+            cost_per_million_tokens: None,
         }
     }
 }
