@@ -22,6 +22,43 @@ pub fn run(args: Vec<String>) -> Result<()> {
         None => cmd_name.clone(),
     };
 
+    // PC: check structural cache before executing — skip the command entirely on a hit.
+    let pre_cache_key = crate::pre_cache::PreCache::compute_key(&args);
+    {
+        let pre_cache = crate::pre_cache::PreCache::load(&crate::session::session_id());
+        if let Some(ref pck) = pre_cache_key {
+            if let Some(entry) = pre_cache.lookup(pck) {
+                let age = crate::session::format_age(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                        .saturating_sub(entry.ts),
+                );
+                let mut out = entry.output.clone();
+                out.push_str(&format!(
+                    "\n[PC: cached from {} ago — ~{} tokens saved; key {}]",
+                    age,
+                    entry.tokens,
+                    &pck.key[..8.min(pck.key.len())]
+                ));
+                print!("{}", out);
+                if !out.ends_with('\n') {
+                    println!();
+                }
+                let analytics = ccr_core::analytics::Analytics::new(
+                    entry.tokens,
+                    0,
+                    Some(cmd_name),
+                    subcommand,
+                    Some(0),
+                );
+                append_analytics(&analytics);
+                return Ok(());
+            }
+        }
+    }
+
     let handler = crate::handlers::get_handler(&cmd_name);
 
     // Rewrite args (e.g. inject --message-format json for cargo)
@@ -57,9 +94,26 @@ pub fn run(args: Vec<String>) -> Result<()> {
     // ZI: enable Zoom-In so compressed markers include expand IDs.
     ccr_core::zoom::enable();
 
+    // NL: apply project noise pre-filter before the pipeline sees the output.
+    let project_key = crate::util::project_key();
+    let (raw_output_for_learning, pipeline_input) = {
+        let noise_store = project_key.as_ref().map(|k| crate::noise_learner::NoiseStore::load(k));
+        if let Some(ref store) = noise_store {
+            let lines: Vec<&str> = raw_output.lines().collect();
+            let kept = store.apply_pre_filter(&lines);
+            if kept.len() < lines.len() {
+                (raw_output.clone(), kept.join("\n"))
+            } else {
+                (raw_output.clone(), raw_output.clone())
+            }
+        } else {
+            (raw_output.clone(), raw_output.clone())
+        }
+    };
+
     // Filter the output
     let filtered = if let Some(ref h) = handler {
-        h.filter(&raw_output, &args)
+        h.filter(&pipeline_input, &args)
     } else {
         // Pipeline fallback for unknown commands
         let config = match crate::config_loader::load_config() {
@@ -72,16 +126,32 @@ pub fn run(args: Vec<String>) -> Result<()> {
             crate::session::SessionState::load(&sid_p).context_pressure()
         };
         let pipeline = ccr_core::pipeline::Pipeline::new(config.with_pressure(pressure));
-        match pipeline.process(&raw_output, Some(&cmd_name), Some(&cmd_name), None) {
+        match pipeline.process(&pipeline_input, Some(&cmd_name), Some(&cmd_name), None) {
             Ok(r) => {
                 // Persist zoom blocks from pipeline fallback.
                 let sid_z = crate::session::session_id();
                 let _ = crate::zoom_store::save_blocks(&sid_z, r.zoom_blocks);
                 r.output
             }
-            Err(_) => raw_output.clone(),
+            Err(_) => pipeline_input.clone(),
         }
     };
+
+    // NL: record what was suppressed so we can learn project noise patterns.
+    if let Some(ref key) = project_key {
+        let mut store = crate::noise_learner::NoiseStore::load(key);
+        let input_lines: Vec<&str> = raw_output_for_learning.lines().collect();
+        let output_lines: Vec<&str> = filtered.lines().collect();
+        store.record_lines(&input_lines, &output_lines);
+        store.promote_eligible();
+        store.evict_stale(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        );
+        store.save(key);
+    }
 
     // Idea 3: Delta compression — suppress lines seen in a prior run of the same command.
     // Skip for short outputs (< 20 lines) where delta overhead exceeds savings.
@@ -139,6 +209,15 @@ pub fn run(args: Vec<String>) -> Result<()> {
     } else {
         filtered
     };
+
+    // PC: write-through — store the filtered result for future cache hits.
+    if let Some(ref pck) = pre_cache_key {
+        let tokens_for_cache = ccr_core::tokens::count_tokens(&filtered);
+        let mut pc = crate::pre_cache::PreCache::load(&crate::session::session_id());
+        pc.evict_old();
+        pc.insert(pck.clone(), &filtered, tokens_for_cache);
+        pc.save(&crate::session::session_id());
+    }
 
     // Compute analytics
     let input_tokens = tokens::count_tokens(&raw_output);

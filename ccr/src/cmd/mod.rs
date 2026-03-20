@@ -3,6 +3,7 @@ pub mod discover;
 pub mod expand;
 pub mod filter;
 pub mod gain;
+pub mod noise;
 pub mod proxy;
 pub mod rewrite;
 pub mod run;

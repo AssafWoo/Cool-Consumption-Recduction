@@ -4,7 +4,11 @@ mod cmd;
 mod config_loader;
 mod handlers;
 mod hook;
+mod intent;
+mod noise_learner;
+mod pre_cache;
 mod session;
+mod util;
 mod zoom_store;
 
 #[derive(Parser)]
@@ -64,6 +68,12 @@ enum Commands {
         #[arg(long)]
         list: bool,
     },
+    /// Show or reset learned noise patterns for the current project
+    Noise {
+        /// Clear all learned patterns for this project
+        #[arg(long)]
+        reset: bool,
+    },
     /// Compress a conversation JSON to reduce token count
     Compress {
         /// Path to conversation JSON file (use - for stdin)
@@ -109,6 +119,7 @@ fn main() {
         Commands::Proxy { args } => cmd::proxy::run(args),
         Commands::Discover => cmd::discover::run(),
         Commands::Expand { id, list } => cmd::expand::run(id.as_deref().unwrap_or(""), list),
+        Commands::Noise { reset } => cmd::noise::run(reset),
         Commands::Compress { input, output, recent_turns, tier1_turns, ollama, ollama_model, max_tokens } =>
             cmd::compress::run(&input, output.as_deref(), recent_turns, tier1_turns, ollama.as_deref(), &ollama_model, max_tokens),
     };
@@ -175,6 +186,8 @@ jq -n --argjson updated "$UPDATED_INPUT" \
     // Merge CCR entries into existing hook arrays rather than overwriting them.
     // This preserves hooks from other tools (e.g. RTK).
     merge_hook(&mut settings, "PostToolUse", "Bash", &ccr_hook_cmd);
+    merge_hook(&mut settings, "PostToolUse", "Read", &ccr_hook_cmd);
+    merge_hook(&mut settings, "PostToolUse", "Glob", &ccr_hook_cmd);
     merge_hook(&mut settings, "PreToolUse",  "Bash", &ccr_rewrite_cmd);
 
     let parent = settings_path.parent().unwrap();

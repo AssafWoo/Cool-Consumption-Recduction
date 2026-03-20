@@ -5,7 +5,6 @@ use std::io::{self, Read};
 #[derive(Debug, Deserialize)]
 struct HookInput {
     #[serde(default)]
-    #[allow(dead_code)]
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
@@ -37,6 +36,16 @@ pub fn run() -> Result<()> {
         Err(_) => return Ok(()),
     };
 
+    match hook_input.tool_name.as_str() {
+        "Read" => process_read(hook_input),
+        "Glob" => process_glob(hook_input),
+        _ => process_bash(hook_input), // Bash and unknown tools
+    }
+}
+
+// ── Bash tool handler ─────────────────────────────────────────────────────────
+
+fn process_bash(hook_input: HookInput) -> Result<()> {
     let command_hint = hook_input
         .tool_input
         .get("command")
@@ -59,20 +68,19 @@ pub fn run() -> Result<()> {
         Err(_) => return Ok(()),
     };
 
-    // B2: use command string as query for biased BERT summarization
-    let query = hook_input
-        .tool_input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // IX: use Claude's last assistant message as the BERT query when available.
+    // Falls back to the command string if no session file is found.
+    let query = crate::intent::extract_intent().or_else(|| {
+        hook_input
+            .tool_input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
 
-    // Load session BEFORE pipeline call so we can pass the historical centroid
-    // and context pressure to the summarizer.
     let sid = crate::session::session_id();
     let mut session = crate::session::SessionState::load(&sid);
 
-    // Use the first two words of the full command as the delta/centroid key.
-    // "git status" is distinct from "git log"; "git status" matches "git status --short".
     let full_cmd = hook_input
         .tool_input
         .get("command")
@@ -86,14 +94,30 @@ pub fn run() -> Result<()> {
 
     let historical_centroid = session.command_centroid(&cmd_key).cloned();
 
-    // EC: tighten pipeline config proportionally to how full the context window is.
     let pressure = session.context_pressure();
-    // ZI: enable Zoom-In so collapsed/omitted markers include expand IDs.
     ccr_core::zoom::enable();
+
+    // NL: apply pre-filter to remove lines promoted as permanent noise.
+    let project_key = crate::util::project_key();
+    let noise_store = project_key
+        .as_ref()
+        .map(|k| crate::noise_learner::NoiseStore::load(k));
+
+    let raw_lines: Vec<&str> = output_text.lines().collect();
+    let filtered_text: String = if let Some(ref store) = noise_store {
+        let kept = store.apply_pre_filter(&raw_lines);
+        if kept.len() < raw_lines.len() {
+            kept.join("\n")
+        } else {
+            output_text.clone()
+        }
+    } else {
+        output_text.clone()
+    };
 
     let pipeline = ccr_core::pipeline::Pipeline::new(config.with_pressure(pressure));
     let result = match pipeline.process(
-        &output_text,
+        &filtered_text,
         command_hint.as_deref(),
         query.as_deref(),
         historical_centroid.as_deref(),
@@ -102,13 +126,19 @@ pub fn run() -> Result<()> {
         Err(_) => return Ok(()),
     };
 
-    // Persist zoom blocks so `ccr expand ZI_N` can retrieve them.
+    // NL: record what the pipeline suppressed so we can learn project noise.
+    if let (Some(ref key), Some(mut store)) = (&project_key, noise_store) {
+        let output_lines: Vec<&str> = result.output.lines().collect();
+        store.record_lines(&raw_lines, &output_lines);
+        store.promote_eligible();
+        store.evict_stale(now_secs());
+        store.save(key);
+    }
+
     let _ = crate::zoom_store::save_blocks(&sid, result.zoom_blocks);
 
     // ── Session-aware passes ──────────────────────────────────────────────────
 
-    // Idea 3: Delta compression — embed pipeline output and suppress lines
-    // already seen in a prior run of the same command.
     let pipeline_emb = ccr_core::summarizer::embed_batch(&[result.output.as_str()])
         .ok()
         .and_then(|mut v| v.pop());
@@ -123,12 +153,8 @@ pub fn run() -> Result<()> {
         result.output.clone()
     };
 
-    // C1: Sentence-level deduplication against recent session content.
-    // Marks sentences that repeat earlier tool outputs as [covered in turn N].
     let after_dedup = apply_sentence_dedup(&output_after_delta, &cmd_key, &session);
 
-    // C2: Apply extra line compression when the session is token-heavy.
-    // Idea 7: Use historical command centroid when available for smarter second-pass.
     let compression_factor = session.compression_factor();
     let centroid_for_c2 = session.command_centroid(&cmd_key).cloned();
     let mut final_output = if compression_factor < 0.90 {
@@ -144,19 +170,14 @@ pub fn run() -> Result<()> {
         after_dedup
     };
 
-    // B3: Record in session cache for cross-turn dedup on future calls.
-    // Idea 7: Also update per-command historical centroid using line-mean embedding
-    //         (better quality than embedding the whole output as a single string).
     if let Ok(mut embeddings) = ccr_core::summarizer::embed_batch(&[final_output.as_str()]) {
         if let Some(emb) = embeddings.pop() {
             let tokens = ccr_core::tokens::count_tokens(&final_output);
-            // Update centroid with line-mean for better per-command history
             if let Ok(line_centroid) = ccr_core::summarizer::compute_output_centroid(&final_output) {
                 session.update_command_centroid(&cmd_key, line_centroid);
             } else {
                 session.update_command_centroid(&cmd_key, emb.clone());
             }
-            // SD: state commands get full-content storage for accurate delta beyond 4000 chars.
             let is_state = {
                 if let Ok(cfg) = crate::config_loader::load_config() {
                     cfg.global.state_commands.iter().any(|s| {
@@ -171,8 +192,6 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // EC: In critical pressure (>0.8), append a notice so the user knows why
-    // output is heavily compressed.
     if pressure > 0.80 {
         final_output.push_str(
             "\n[⚠ context near full — output compressed aggressively; run `ccr gain` to review]",
@@ -185,8 +204,213 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// C1: Build a deduplication context from recent session entries and apply
-/// the ccr-sdk sentence deduplicator to the current output.
+// ── Read tool handler ─────────────────────────────────────────────────────────
+
+fn process_read(hook_input: HookInput) -> Result<()> {
+    let file_path = hook_input
+        .tool_input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let output_text = hook_input.tool_response.output.clone();
+
+    if output_text.is_empty() {
+        return Ok(());
+    }
+
+    // Binary file guard: if output contains null bytes, pass through unchanged
+    if output_text.bytes().any(|b| b == 0) {
+        return Ok(());
+    }
+
+    // Short files pass through without compression
+    let line_count = output_text.lines().count();
+    if line_count < 50 {
+        return Ok(());
+    }
+
+    let config = match crate::config_loader::load_config() {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    // Use file extension as command hint, intent as query
+    let ext_hint = std::path::Path::new(&file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string());
+
+    let query = crate::intent::extract_intent().or_else(|| {
+        std::path::Path::new(&file_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    });
+
+    let sid = crate::session::session_id();
+    let mut session = crate::session::SessionState::load(&sid);
+    let historical_centroid = session.command_centroid(&file_path).cloned();
+    let pressure = session.context_pressure();
+
+    ccr_core::zoom::enable();
+    let pipeline = ccr_core::pipeline::Pipeline::new(config.with_pressure(pressure));
+    let result = match pipeline.process(
+        &output_text,
+        ext_hint.as_deref(),
+        query.as_deref(),
+        historical_centroid.as_deref(),
+    ) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+
+    let _ = crate::zoom_store::save_blocks(&sid, result.zoom_blocks);
+
+    // Session dedup using file_path as cmd_key
+    let compressed = if let Ok(mut embs) =
+        ccr_core::summarizer::embed_batch(&[result.output.as_str()])
+    {
+        if let Some(emb) = embs.pop() {
+            let tokens = ccr_core::tokens::count_tokens(&result.output);
+            if let Some(hit) = session.find_similar(&file_path, &emb) {
+                let age = crate::session::format_age(hit.age_secs);
+                format!(
+                    "[same file content as turn {} ({} ago) — {} tokens saved]",
+                    hit.turn, age, hit.tokens_saved
+                )
+            } else {
+                session.record(&file_path, emb, tokens, &result.output, false);
+                session.save(&sid);
+                result.output
+            }
+        } else {
+            result.output
+        }
+    } else {
+        result.output
+    };
+
+    let hook_output = HookOutput { output: compressed };
+    println!("{}", serde_json::to_string(&hook_output)?);
+
+    Ok(())
+}
+
+// ── Glob tool handler ─────────────────────────────────────────────────────────
+
+fn process_glob(hook_input: HookInput) -> Result<()> {
+    let pattern = hook_input
+        .tool_input
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let output_text = hook_input.tool_response.output.clone();
+
+    if output_text.is_empty() {
+        return Ok(());
+    }
+
+    let paths: Vec<&str> = output_text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let total = paths.len();
+
+    // Short results pass through
+    if total <= 20 {
+        return Ok(());
+    }
+
+    let sid = crate::session::session_id();
+    let mut session = crate::session::SessionState::load(&sid);
+    let cmd_key = format!("glob:{}", pattern);
+
+    // Session dedup: hash the exact path list
+    let list_hash = crate::util::hash_str(&output_text);
+    if let Some(entry) = session.entries.iter().rev().find(|e| e.cmd == cmd_key) {
+        if entry.content_preview.starts_with(&list_hash) {
+            let hook_output = HookOutput {
+                output: format!(
+                    "[same glob result as turn {} — {} paths]",
+                    entry.turn, total
+                ),
+            };
+            println!("{}", serde_json::to_string(&hook_output)?);
+            return Ok(());
+        }
+    }
+
+    // Group paths by parent directory
+    let mut by_dir: std::collections::BTreeMap<String, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for path in &paths {
+        let parent = std::path::Path::new(path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or(".")
+            .to_string();
+        by_dir.entry(parent).or_default().push(path);
+    }
+
+    let mut output_lines: Vec<String> = Vec::new();
+    let mut shown = 0usize;
+    const MAX_SHOWN: usize = 60;
+
+    for (dir, files) in &by_dir {
+        if shown >= MAX_SHOWN {
+            break;
+        }
+        let remaining = MAX_SHOWN - shown;
+        let show_count = files.len().min(remaining);
+        for f in &files[..show_count] {
+            output_lines.push(f.to_string());
+        }
+        if files.len() > show_count {
+            output_lines.push(format!("  [+{} more in {}/]", files.len() - show_count, dir));
+        }
+        shown += show_count;
+    }
+
+    let hidden = total.saturating_sub(shown);
+    if hidden > 0 {
+        output_lines.push(format!("[+{} more paths not shown]", hidden));
+    }
+    output_lines.push(format!("[Glob: {} — {} paths total]", pattern, total));
+
+    let compressed = output_lines.join("\n");
+
+    // Record in session (use hash prefix as content_preview for dedup)
+    let tokens = ccr_core::tokens::count_tokens(&compressed);
+    let preview = format!("{} {}", list_hash, &compressed[..compressed.len().min(3900)]);
+    if let Ok(mut embs) = ccr_core::summarizer::embed_batch(&[compressed.as_str()]) {
+        if let Some(emb) = embs.pop() {
+            session.entries.push(crate::session::SessionEntry {
+                turn: session.total_turns + 1,
+                cmd: cmd_key,
+                ts: now_secs(),
+                tokens,
+                embedding: emb,
+                content_preview: preview,
+                state_content: None,
+            });
+            session.total_turns += 1;
+            session.total_tokens += tokens;
+            if session.entries.len() > 30 {
+                session.entries.remove(0);
+            }
+            session.save(&sid);
+        }
+    }
+
+    let hook_output = HookOutput { output: compressed };
+    println!("{}", serde_json::to_string(&hook_output)?);
+
+    Ok(())
+}
+
+// ── Sentence dedup (C1) ───────────────────────────────────────────────────────
+
 fn apply_sentence_dedup(
     output: &str,
     _cmd: &str,
@@ -195,8 +419,6 @@ fn apply_sentence_dedup(
     use ccr_sdk::deduplicator::deduplicate;
     use ccr_sdk::message::Message;
 
-    // Use last 8 entries as prior context regardless of command —
-    // repeated file content and error messages appear across different commands.
     let prior = session.recent_content(8);
     if prior.is_empty() {
         return output.to_string();
@@ -219,4 +441,11 @@ fn apply_sentence_dedup(
         .last()
         .map(|m| m.content)
         .unwrap_or_else(|| output.to_string())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
