@@ -189,6 +189,21 @@ fn get_handler_alias(cmd: &str) -> Option<Box<dyn Handler>> {
 
 // ── Level 3: BERT similarity routing ─────────────────────────────────────────
 
+/// Wraps an inner handler to disable rewrite_args (filter output only, no arg injection).
+/// Used for MEDIUM confidence BERT routes where we're not confident enough to modify args.
+struct FilterOnlyHandler {
+    inner: Box<dyn Handler>,
+}
+
+impl Handler for FilterOnlyHandler {
+    fn rewrite_args(&self, args: &[String]) -> Vec<String> {
+        args.to_vec()  // no-op: don't modify args when confidence is medium
+    }
+    fn filter(&self, output: &str, args: &[String]) -> String {
+        self.inner.filter(output, args)
+    }
+}
+
 /// Handler representatives: (canonical_name, display_label) for embedding.
 /// We embed the canonical name and compare against the unknown command.
 const HANDLER_REPS: &[(&str, &str)] = &[
@@ -218,32 +233,106 @@ const HANDLER_REPS: &[(&str, &str)] = &[
     ("log output lines errors warnings","log"),
 ];
 
-const BERT_ROUTE_THRESHOLD: f32 = 0.55;
+const BERT_THRESHOLD_HIGH: f32 = 0.70;  // Full handler (filter + rewrite_args)
+const BERT_THRESHOLD_MED:  f32 = 0.55;  // Filter only (no rewrite_args)
+const BERT_MARGIN_HIGH:    f32 = 0.15;  // Gap between top-1 and top-2 for HIGH
+const BERT_MARGIN_MED:     f32 = 0.08;  // Gap between top-1 and top-2 for MED
+const BERT_SUBCOMMAND_BOOST: f32 = 0.08; // Boost when subcommand matches known pattern
+
+/// Maps known subcommand words to the handler labels they strongly suggest.
+/// If `cmd` contains a space and the subcommand matches, apply a boost to that handler's score.
+const SUBCOMMAND_HINTS: &[(&str, &str)] = &[
+    // test-runner subcommands
+    ("test",    "pytest"),
+    ("test",    "jest"),
+    ("test",    "vitest"),
+    ("test",    "go"),
+    // build tools
+    ("build",   "cargo"),
+    ("build",   "go"),
+    ("build",   "docker"),
+    ("build",   "next"),
+    ("build",   "mvn"),
+    // install / add
+    ("install", "npm"),
+    ("install", "pnpm"),
+    ("install", "brew"),
+    ("install", "pip"),
+    ("install", "helm"),
+    // run / exec
+    ("run",     "go"),
+    ("run",     "cargo"),
+    ("run",     "docker"),
+    // lint
+    ("lint",    "eslint"),
+    ("lint",    "golangci-lint"),
+    ("lint",    "clippy"),
+    ("check",   "cargo"),
+    ("check",   "tsc"),
+    // deploy / infra
+    ("plan",    "terraform"),
+    ("apply",   "terraform"),
+    ("apply",   "kubectl"),
+];
 
 fn get_handler_bert(cmd: &str) -> Option<Box<dyn Handler>> {
-    // Only route commands that look like real CLI tools (not paths, not flags)
     if cmd.contains('/') || cmd.starts_with('-') || cmd.is_empty() {
         return None;
     }
 
+    // Split into binary and subcommand (e.g. "bloop test" → binary="bloop", sub=Some("test"))
+    let mut parts = cmd.splitn(2, ' ');
+    let binary = parts.next().unwrap_or(cmd);
+    let subcommand = parts.next().unwrap_or("").to_lowercase();
+
+    // Embed all rep phrases + the binary name
     let reps: Vec<&str> = HANDLER_REPS.iter().map(|(rep, _)| *rep).collect();
     let mut all_texts = reps.clone();
-    all_texts.push(cmd);
+    all_texts.push(binary);  // embed just the binary, not the full cmd with args
 
     let embeddings = ccr_core::summarizer::embed_batch(&all_texts).ok()?;
     let cmd_emb = embeddings.last()?;
     let rep_embs = &embeddings[..embeddings.len() - 1];
 
-    let (best_idx, best_sim) = rep_embs
+    // Compute similarities with optional subcommand boost
+    let mut scores: Vec<(usize, f32)> = rep_embs
         .iter()
         .enumerate()
-        .map(|(i, emb)| (i, util::cosine_similarity(emb, cmd_emb)))
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+        .map(|(i, emb)| {
+            let mut sim = util::cosine_similarity(emb, cmd_emb);
+            // Apply subcommand boost if the subcommand matches this handler
+            if !subcommand.is_empty() {
+                let target_label = HANDLER_REPS[i].1;
+                let matches = SUBCOMMAND_HINTS
+                    .iter()
+                    .any(|(sub, lbl)| *sub == subcommand.as_str() && *lbl == target_label);
+                if matches {
+                    sim += BERT_SUBCOMMAND_BOOST;
+                    sim = sim.min(1.0);
+                }
+            }
+            (i, sim)
+        })
+        .collect();
 
-    if best_sim >= BERT_ROUTE_THRESHOLD {
-        let target = HANDLER_REPS[best_idx].1;
-        return get_handler_exact(target);
+    // Sort descending by score to find top-1 and top-2
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let (best_idx, best_sim) = scores[0];
+    let second_sim = scores.get(1).map(|(_, s)| *s).unwrap_or(0.0);
+    let margin = best_sim - second_sim;
+
+    let target = HANDLER_REPS[best_idx].1;
+
+    if best_sim >= BERT_THRESHOLD_HIGH && margin >= BERT_MARGIN_HIGH {
+        // HIGH confidence: full handler including rewrite_args
+        get_handler_exact(target)
+    } else if best_sim >= BERT_THRESHOLD_MED && margin >= BERT_MARGIN_MED {
+        // MEDIUM confidence: filter only, no arg rewriting
+        get_handler_exact(target).map(|h| -> Box<dyn Handler> {
+            Box::new(FilterOnlyHandler { inner: h })
+        })
+    } else {
+        None
     }
-
-    None
 }

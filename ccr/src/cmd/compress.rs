@@ -15,22 +15,48 @@ pub fn run(
     ollama_url: Option<&str>,
     ollama_model: &str,
     max_tokens: Option<usize>,
+    dry_run: bool,
+    scan_session: bool,
 ) -> Result<()> {
-    // Read input from file path or stdin ("-")
-    let raw = if input == "-" {
-        let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s)?;
-        s
+    let (raw, source_path) = if scan_session {
+        let path = find_latest_jsonl()
+            .ok_or_else(|| anyhow::anyhow!("no .jsonl files found under ~/.claude/projects/"))?;
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("cannot read '{}': {}", path.display(), e))?;
+        (raw, Some(path))
     } else {
-        std::fs::read_to_string(input)
-            .map_err(|e| anyhow::anyhow!("cannot read '{}': {}", input, e))?
+        let raw = if input == "-" {
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            s
+        } else {
+            std::fs::read_to_string(input)
+                .map_err(|e| anyhow::anyhow!("cannot read '{}': {}", input, e))?
+        };
+        (raw, None)
     };
 
-    let messages = parse_conversation(&raw)?;
+    let messages = if scan_session {
+        parse_jsonl_conversation(&raw)?
+    } else {
+        parse_conversation(&raw)?
+    };
 
     if messages.is_empty() {
-        let out = "[]";
-        write_output(out, output)?;
+        if dry_run {
+            println!("[dry-run] 0 turns · 0 → 0 tokens (0% saved)");
+        } else {
+            let out = "[]";
+            match &source_path {
+                Some(path) if scan_session => {
+                    let out_path = format!("{}.compressed.json", path.display());
+                    std::fs::write(&out_path, out)
+                        .map_err(|e| anyhow::anyhow!("cannot write to '{}': {}", out_path, e))?;
+                    eprintln!("[ccr compress] wrote compressed output to {}", out_path);
+                }
+                _ => write_output(out, output)?,
+            }
+        }
         return Ok(());
     }
 
@@ -47,21 +73,56 @@ pub fn run(
     };
 
     // Deduplicate first, then compress (matches Optimizer logic)
-    let deduped = deduplicate(messages);
+    let deduped = deduplicate(messages.clone());
     let result = compress(deduped, &config);
 
-    let json = serde_json::to_string_pretty(&result.messages)?;
-    write_output(&json, output)?;
+    let turns = messages.len();
 
-    // Stats to stderr so they don't pollute piped output
-    if result.tokens_in > 0 {
-        let saved_pct =
+    if dry_run {
+        let saved_pct = if result.tokens_in > 0 {
             100.0 * (result.tokens_in - result.tokens_out.min(result.tokens_in)) as f64
-                / result.tokens_in as f64;
-        eprintln!(
-            "[ccr compress] {} → {} tokens ({:.0}% saved)",
-            result.tokens_in, result.tokens_out, saved_pct
+                / result.tokens_in as f64
+        } else {
+            0.0
+        };
+        println!(
+            "[dry-run] {} turns · {} → {} tokens ({:.0}% saved)",
+            turns, result.tokens_in, result.tokens_out, saved_pct
         );
+        return Ok(());
+    }
+
+    let json = serde_json::to_string_pretty(&result.messages)?;
+
+    match &source_path {
+        Some(path) if scan_session => {
+            let out_path = format!("{}.compressed.json", path.display());
+            std::fs::write(&out_path, &json)
+                .map_err(|e| anyhow::anyhow!("cannot write to '{}': {}", out_path, e))?;
+            if result.tokens_in > 0 {
+                let saved_pct =
+                    100.0 * (result.tokens_in - result.tokens_out.min(result.tokens_in)) as f64
+                        / result.tokens_in as f64;
+                eprintln!(
+                    "[ccr compress] {} → {} tokens ({:.0}% saved)",
+                    result.tokens_in, result.tokens_out, saved_pct
+                );
+            }
+            eprintln!("[ccr compress] wrote compressed output to {}", out_path);
+        }
+        _ => {
+            write_output(&json, output)?;
+            // Stats to stderr so they don't pollute piped output
+            if result.tokens_in > 0 {
+                let saved_pct =
+                    100.0 * (result.tokens_in - result.tokens_out.min(result.tokens_in)) as f64
+                        / result.tokens_in as f64;
+                eprintln!(
+                    "[ccr compress] {} → {} tokens ({:.0}% saved)",
+                    result.tokens_in, result.tokens_out, saved_pct
+                );
+            }
+        }
     }
 
     Ok(())
@@ -76,6 +137,88 @@ fn write_output(content: &str, path: Option<&str>) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Find the most recently modified `.jsonl` file under `~/.claude/projects/`.
+fn find_latest_jsonl() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let projects_dir = home.join(".claude").join("projects");
+    if !projects_dir.exists() {
+        return None;
+    }
+
+    let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    visit_dir(&projects_dir, &mut best);
+    best.map(|(path, _)| path)
+}
+
+fn visit_dir(
+    dir: &std::path::Path,
+    best: &mut Option<(std::path::PathBuf, std::time::SystemTime)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            visit_dir(&path, best);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(modified) = meta.modified() {
+                    let is_newer = best
+                        .as_ref()
+                        .map(|(_, t)| modified > *t)
+                        .unwrap_or(true);
+                    if is_newer {
+                        *best = Some((path, modified));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse a JSONL conversation from `~/.claude/projects/`.
+/// Each line is a JSON object with `"type"` and `"message"` fields.
+/// Only `"user"` and `"assistant"` type lines are extracted.
+fn parse_jsonl_conversation(raw: &str) -> Result<Vec<Message>> {
+    let mut messages = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let typ = v["type"].as_str().unwrap_or("");
+        if typ != "user" && typ != "assistant" {
+            continue;
+        }
+        let role = typ.to_string();
+        let content_val = &v["message"]["content"];
+        let content = if let Some(s) = content_val.as_str() {
+            s.to_string()
+        } else if let Some(arr) = content_val.as_array() {
+            arr.iter()
+                .filter_map(|block| {
+                    if block["type"].as_str() == Some("text") {
+                        block["text"].as_str().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
+        messages.push(Message { role, content });
+    }
+    Ok(messages)
 }
 
 /// Parse a conversation JSON.
@@ -174,5 +317,52 @@ mod tests {
         // Verify the empty path works end-to-end
         let msgs = parse_conversation("[]").unwrap();
         assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn parse_jsonl_extracts_user_and_assistant() {
+        let jsonl = r#"{"type":"system","message":{"role":"system","content":"You are helpful."}}
+{"type":"user","message":{"role":"user","content":"Hello there"}}
+{"type":"assistant","message":{"role":"assistant","content":"Hi! How can I help?"}}
+{"type":"tool_use","message":{"role":"tool","content":"some tool output"}}"#;
+        let msgs = parse_jsonl_conversation(jsonl).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content, "Hello there");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].content, "Hi! How can I help?");
+    }
+
+    #[test]
+    fn parse_jsonl_handles_array_content_blocks() {
+        let jsonl = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Part one"},{"type":"text","text":"Part two"}]}}"#;
+        let msgs = parse_jsonl_conversation(jsonl).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "Part one\nPart two");
+    }
+
+    #[test]
+    fn parse_jsonl_skips_non_text_blocks_in_array() {
+        let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}},{"type":"text","text":"Done."}]}}"#;
+        let msgs = parse_jsonl_conversation(jsonl).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "Done.");
+    }
+
+    #[test]
+    fn parse_jsonl_empty_input() {
+        let msgs = parse_jsonl_conversation("").unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn find_latest_jsonl_returns_none_when_dir_missing() {
+        // ~/.claude/projects/ may or may not exist; we just verify the function
+        // doesn't panic and returns None when given a nonexistent path by
+        // checking the behavior of visit_dir directly with a temp path.
+        let nonexistent = std::path::Path::new("/tmp/ccr_test_nonexistent_dir_xyz");
+        let mut best = None;
+        visit_dir(nonexistent, &mut best);
+        assert!(best.is_none());
     }
 }

@@ -233,7 +233,7 @@ fn process_bash(hook_input: HookInput) -> Result<()> {
 
     if pressure > 0.80 {
         final_output.push_str(
-            "\n[⚠ context near full — output compressed aggressively; run `ccr gain` to review]",
+            "\n[⚠ context near full — run `ccr compress --scan-session --dry-run` to estimate savings, or `ccr compress --scan-session` to compress]",
         );
     }
 

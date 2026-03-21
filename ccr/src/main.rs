@@ -100,6 +100,12 @@ enum Commands {
         /// Target token budget (compress until under this limit)
         #[arg(long)]
         max_tokens: Option<usize>,
+        /// Only print savings estimate without writing output
+        #[arg(long)]
+        dry_run: bool,
+        /// Find and compress the most recently modified conversation in ~/.claude/projects/
+        #[arg(long)]
+        scan_session: bool,
     },
 }
 
@@ -124,8 +130,8 @@ fn main() {
         Commands::Expand { id, list } => cmd::expand::run(id.as_deref().unwrap_or(""), list),
         Commands::Noise { reset } => cmd::noise::run(reset),
         Commands::Update => cmd::update::run(),
-        Commands::Compress { input, output, recent_turns, tier1_turns, ollama, ollama_model, max_tokens } =>
-            cmd::compress::run(&input, output.as_deref(), recent_turns, tier1_turns, ollama.as_deref(), &ollama_model, max_tokens),
+        Commands::Compress { input, output, recent_turns, tier1_turns, ollama, ollama_model, max_tokens, dry_run, scan_session } =>
+            cmd::compress::run(&input, output.as_deref(), recent_turns, tier1_turns, ollama.as_deref(), &ollama_model, max_tokens, dry_run, scan_session),
     };
     if let Err(e) = result {
         eprintln!("ccr error: {}", e);

@@ -2,12 +2,109 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Static savings-ratio table covering all known ccr handlers.
+/// Values are fractions (0.0–1.0) of output tokens that ccr typically eliminates.
+const HANDLER_SAVINGS: &[(&str, f32)] = &[
+    ("cargo", 0.87),
+    ("curl", 0.96),
+    ("git", 0.80),
+    ("docker", 0.85),
+    ("docker-compose", 0.85),
+    ("npm", 0.85),
+    ("pnpm", 0.85),
+    ("yarn", 0.85),
+    ("ls", 0.80),
+    ("cat", 0.70),
+    ("grep", 0.80),
+    ("rg", 0.80),
+    ("find", 0.78),
+    ("kubectl", 0.75),
+    ("terraform", 0.70),
+    ("pytest", 0.80),
+    ("jest", 0.75),
+    ("vitest", 0.75),
+    ("pip", 0.60),
+    ("pip3", 0.60),
+    ("uv", 0.60),
+    ("go", 0.65),
+    ("helm", 0.70),
+    ("brew", 0.65),
+    ("gh", 0.60),
+    ("make", 0.55),
+    ("tsc", 0.70),
+    ("mvn", 0.80),
+    ("python", 0.50),
+    ("python3", 0.50),
+    ("eslint", 0.65),
+    ("aws", 0.65),
+    ("jq", 0.60),
+    ("diff", 0.60),
+    ("journalctl", 0.75),
+    ("psql", 0.65),
+    ("tree", 0.70),
+    ("env", 0.50),
+];
+
 struct Opportunity {
     command: String,
     total_output_tokens: usize,
     call_count: usize,
     savings_pct: f32,
     ratio_source: &'static str,
+}
+
+/// Returns the top `limit` unoptimized commands sorted by potential token savings (highest first).
+/// Each entry is (command_name, estimated_tokens_saveable).
+/// Commands already routed through ccr are excluded.
+pub fn top_unoptimized(limit: usize) -> Vec<(String, usize)> {
+    let projects_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join("projects"),
+        None => return vec![],
+    };
+
+    if !projects_dir.exists() {
+        return vec![];
+    }
+
+    let mut jsonl_files: Vec<std::path::PathBuf> = Vec::new();
+    collect_jsonl(&projects_dir, &mut jsonl_files);
+
+    if jsonl_files.is_empty() {
+        return vec![];
+    }
+
+    let mut by_cmd: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for path in &jsonl_files {
+        scan_jsonl(path, &mut by_cmd);
+    }
+
+    let actual_ratios = load_actual_savings_ratios();
+    let static_map: BTreeMap<&str, f32> = HANDLER_SAVINGS.iter().cloned().collect();
+
+    let mut results: Vec<(String, usize)> = by_cmd
+        .iter()
+        .filter_map(|(cmd, (tokens, _count))| {
+            if *tokens == 0 {
+                return None;
+            }
+            let savings_ratio = if let Some(&r) = actual_ratios.get(cmd.as_str()) {
+                r
+            } else if let Some(&r) = static_map.get(cmd.as_str()) {
+                r
+            } else {
+                0.40 // BERT fallback
+            };
+            let estimated_saveable = (*tokens as f32 * savings_ratio) as usize;
+            if estimated_saveable < 500 {
+                return None;
+            }
+            Some((cmd.clone(), estimated_saveable))
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.1.cmp(&a.1));
+    results.truncate(limit);
+    results
 }
 
 pub fn run() -> Result<()> {
@@ -46,47 +143,7 @@ pub fn run() -> Result<()> {
     let actual_ratios = load_actual_savings_ratios();
 
     // Extended static fallback table covering all known handlers
-    let handler_savings: &[(&str, f32)] = &[
-        ("cargo", 0.87),
-        ("curl", 0.96),
-        ("git", 0.80),
-        ("docker", 0.85),
-        ("docker-compose", 0.85),
-        ("npm", 0.85),
-        ("pnpm", 0.85),
-        ("yarn", 0.85),
-        ("ls", 0.80),
-        ("cat", 0.70),
-        ("grep", 0.80),
-        ("rg", 0.80),
-        ("find", 0.78),
-        ("kubectl", 0.75),
-        ("terraform", 0.70),
-        ("pytest", 0.80),
-        ("jest", 0.75),
-        ("vitest", 0.75),
-        ("pip", 0.60),
-        ("pip3", 0.60),
-        ("uv", 0.60),
-        ("go", 0.65),
-        ("helm", 0.70),
-        ("brew", 0.65),
-        ("gh", 0.60),
-        ("make", 0.55),
-        ("tsc", 0.70),
-        ("mvn", 0.80),
-        ("python", 0.50),
-        ("python3", 0.50),
-        ("eslint", 0.65),
-        ("aws", 0.65),
-        ("jq", 0.60),
-        ("diff", 0.60),
-        ("journalctl", 0.75),
-        ("psql", 0.65),
-        ("tree", 0.70),
-        ("env", 0.50),
-    ];
-    let static_map: BTreeMap<&str, f32> = handler_savings.iter().cloned().collect();
+    let static_map: BTreeMap<&str, f32> = HANDLER_SAVINGS.iter().cloned().collect();
 
     let mut opportunities: Vec<Opportunity> = by_cmd
         .iter()

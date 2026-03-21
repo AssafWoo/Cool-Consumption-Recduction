@@ -262,6 +262,27 @@ fn print_summary(records: &[Analytics]) {
             println!("{}", line);
         }
     }
+
+    // ── Missed opportunities (from discover) ──
+    let opportunities = crate::cmd::discover::top_unoptimized(5);
+    if !opportunities.is_empty() {
+        // Only show if there are meaningful savings (at least 2k tokens potential)
+        let total_potential: usize = opportunities.iter().map(|(_, t)| t).sum();
+        if total_potential >= 2_000 {
+            println!();
+            let yellow_bold = Style::new().bold().yellow();
+            println!("{}", "Unoptimized Commands".if_supports_color(Stdout, |t| t.style(yellow_bold)));
+            println!("{}", format!("  Run `ccr discover` for full details · ~{} tokens potential",
+                fmt_tokens(total_potential)
+            ).if_supports_color(Stdout, |t| t.dimmed()));
+            for (cmd, saveable) in &opportunities {
+                println!("  {:<14} ~{} saveable",
+                    cmd.if_supports_color(Stdout, |t| t.yellow()),
+                    fmt_tokens(*saveable).if_supports_color(Stdout, |t| t.yellow()),
+                );
+            }
+        }
+    }
 }
 
 // ─── History view (--history) ─────────────────────────────────────────────────
