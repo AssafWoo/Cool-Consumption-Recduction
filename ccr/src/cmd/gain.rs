@@ -1,5 +1,6 @@
 use anyhow::Result;
 use ccr_core::analytics::Analytics;
+use owo_colors::{OwoColorize, Stream::Stdout, Style};
 use std::collections::BTreeMap;
 
 /// Pricing table for known Anthropic model families (input tokens, $/1M).
@@ -97,18 +98,20 @@ fn print_summary(records: &[Analytics]) {
         .collect();
 
     // ── Header ──
-    println!("CCR Token Savings");
-    println!("{}", "═".repeat(49));
+    println!("{}", "CCR Token Savings".if_supports_color(Stdout, |t| t.bold()));
+    println!("{}", "═".repeat(49).if_supports_color(Stdout, |t| t.dimmed()));
     println!("  Runs:           {}", records.len());
+    let green_bold = Style::new().bold().green();
+    let yellow_bold = Style::new().bold().yellow();
     println!(
-        "  Tokens saved:   {}  ({:.1}%)",
-        fmt_tokens(total_saved),
-        overall_pct
+        "  Tokens saved:   {}  ({})",
+        fmt_tokens(total_saved).if_supports_color(Stdout, |t| t.style(green_bold)),
+        format!("{:.1}%", overall_pct).if_supports_color(Stdout, |t| t.green()),
     );
     println!(
-        "  Cost saved:     ~{}  (at {})",
-        fmt_cost(cost_saved),
-        price_label
+        "  Cost saved:     {}  (at {})",
+        format!("~{}", fmt_cost(cost_saved)).if_supports_color(Stdout, |t| t.style(yellow_bold)),
+        price_label.if_supports_color(Stdout, |t| t.dimmed()),
     );
 
     if !today.is_empty() {
@@ -116,10 +119,10 @@ fn print_summary(records: &[Analytics]) {
         let t_in: usize = today.iter().map(|r| r.input_tokens).sum();
         let t_out: usize = today.iter().map(|r| r.output_tokens).sum();
         println!(
-            "  Today:          {} runs · {} saved · {:.1}%",
+            "  Today:          {} runs · {} saved · {}",
             today.len(),
-            fmt_tokens(t_saved),
-            savings_pct(t_in, t_out)
+            fmt_tokens(t_saved).if_supports_color(Stdout, |t| t.cyan()),
+            format!("{:.1}%", savings_pct(t_in, t_out)).if_supports_color(Stdout, |t| t.cyan()),
         );
     }
     if week.len() > today.len() {
@@ -127,10 +130,10 @@ fn print_summary(records: &[Analytics]) {
         let w_in: usize = week.iter().map(|r| r.input_tokens).sum();
         let w_out: usize = week.iter().map(|r| r.output_tokens).sum();
         println!(
-            "  7-day:          {} runs · {} saved · {:.1}%",
+            "  7-day:          {} runs · {} saved · {}",
             week.len(),
-            fmt_tokens(w_saved),
-            savings_pct(w_in, w_out)
+            fmt_tokens(w_saved).if_supports_color(Stdout, |t| t.cyan()),
+            format!("{:.1}%", savings_pct(w_in, w_out)).if_supports_color(Stdout, |t| t.cyan()),
         );
     }
 
@@ -140,7 +143,7 @@ fn print_summary(records: &[Analytics]) {
 
     // ── Per-command table ──
     println!();
-    println!("Per-Command Breakdown");
+    println!("{}", "Per-Command Breakdown".if_supports_color(Stdout, |t| t.bold()));
 
     // Group: cmd -> (input, output, count, total_duration_ms, duration_count)
     let mut by_cmd: BTreeMap<String, CmdStats> = BTreeMap::new();
@@ -163,18 +166,17 @@ fn print_summary(records: &[Analytics]) {
 
     let col_w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(7).max(7);
     let sep = "─".repeat(col_w + 51);
-    println!("{}", sep);
+    println!("{}", sep.if_supports_color(Stdout, |t| t.dimmed()));
     println!(
-        "{:<col_w$} {:>6}  {:>10}  {:>8}  {:>7}  {}",
-        "COMMAND",
-        "RUNS",
-        "SAVED",
-        "SAVINGS",
-        "AVG ms",
-        "IMPACT",
-        col_w = col_w
+        "{}",
+        format!(
+            "{:<col_w$} {:>6}  {:>10}  {:>8}  {:>7}  {}",
+            "COMMAND", "RUNS", "SAVED", "SAVINGS", "AVG ms", "IMPACT",
+            col_w = col_w
+        )
+        .if_supports_color(Stdout, |t| t.bold())
     );
-    println!("{}", sep);
+    println!("{}", sep.if_supports_color(Stdout, |t| t.dimmed()));
 
     for (cmd, stats) in &rows {
         let pct = savings_pct(stats.input, stats.output);
@@ -185,16 +187,29 @@ fn print_summary(records: &[Analytics]) {
         };
         let bar_len = (pct / 5.0) as usize;
         let bar = "█".repeat(bar_len.min(20));
-        println!(
+        let dim_row = pct < 1.0;
+        let bar_colored = if pct >= 40.0 {
+            bar.if_supports_color(Stdout, |t| t.green()).to_string()
+        } else if pct >= 15.0 {
+            bar.if_supports_color(Stdout, |t| t.yellow()).to_string()
+        } else {
+            bar.if_supports_color(Stdout, |t| t.dimmed()).to_string()
+        };
+        let line = format!(
             "{:<col_w$} {:>6}  {:>10}  {:>7.1}%  {}  {}",
             cmd,
             stats.count,
             fmt_tokens(stats.saved()),
             pct,
             avg_ms,
-            bar,
+            bar_colored,
             col_w = col_w
         );
+        if dim_row {
+            println!("{}", line.if_supports_color(Stdout, |t| t.dimmed()));
+        } else {
+            println!("{}", line);
+        }
     }
 }
 
@@ -228,16 +243,20 @@ fn print_history(records: &[Analytics], days: u32) {
     rows.sort_by(|a, b| b.0.cmp(&a.0));
     rows.truncate(days as usize);
 
-    println!("CCR Daily History  (last {} days)", days);
-    println!("{}", "═".repeat(60));
+    println!("{}", format!("CCR Daily History  (last {} days)", days).if_supports_color(Stdout, |t| t.bold()));
+    println!("{}", "═".repeat(60).if_supports_color(Stdout, |t| t.dimmed()));
 
     let sep = "─".repeat(60);
-    println!("{}", sep);
+    println!("{}", sep.if_supports_color(Stdout, |t| t.dimmed()));
     println!(
-        "{:<12}  {:>5}  {:>12}  {:>8}  {:>10}",
-        "DATE", "RUNS", "SAVED", "SAVINGS", "COST SAVED"
+        "{}",
+        format!(
+            "{:<12}  {:>5}  {:>12}  {:>8}  {:>10}",
+            "DATE", "RUNS", "SAVED", "SAVINGS", "COST SAVED"
+        )
+        .if_supports_color(Stdout, |t| t.bold())
     );
-    println!("{}", sep);
+    println!("{}", sep.if_supports_color(Stdout, |t| t.dimmed()));
 
     let mut total_input: usize = 0;
     let mut total_output: usize = 0;
@@ -261,25 +280,35 @@ fn print_history(records: &[Analytics], days: u32) {
         } else {
             fmt_cost(cost)
         };
-        println!(
+        let dim_row = stats.count == 0;
+        let line = format!(
             "{:<12}  {:>5}  {:>12}  {:>8}  {:>10}",
             day, stats.count, saved_str, pct_str, cost_str
         );
+        if dim_row {
+            println!("{}", line.if_supports_color(Stdout, |t| t.dimmed()));
+        } else {
+            println!("{}", line);
+        }
         total_input += stats.input;
         total_output += stats.output;
         total_count += stats.count;
     }
 
-    println!("{}", sep);
+    println!("{}", sep.if_supports_color(Stdout, |t| t.dimmed()));
     let total_saved = total_input.saturating_sub(total_output);
     let total_cost = total_saved as f64 * price_per_token;
     println!(
-        "{:<12}  {:>5}  {:>12}  {:>8}  {:>10}",
-        format!("{}-day total", days),
-        total_count,
-        fmt_tokens(total_saved),
-        format!("{:.1}%", savings_pct(total_input, total_output)),
-        fmt_cost(total_cost)
+        "{}",
+        format!(
+            "{:<12}  {:>5}  {:>12}  {:>8}  {:>10}",
+            format!("{}-day total", days),
+            total_count,
+            fmt_tokens(total_saved),
+            format!("{:.1}%", savings_pct(total_input, total_output)),
+            fmt_cost(total_cost)
+        )
+        .if_supports_color(Stdout, |t| t.bold())
     );
 
     // Top commands over the period
@@ -296,10 +325,10 @@ fn print_history(records: &[Analytics], days: u32) {
         cmd_rows.sort_by(|a, b| b.1.saved().cmp(&a.1.saved()));
 
         println!();
-        println!("Top Commands");
-        println!("{}", "─".repeat(42));
-        println!("{:<14} {:>5}  {:>10}  {:>7}", "COMMAND", "RUNS", "SAVED", "SAVINGS");
-        println!("{}", "─".repeat(42));
+        println!("{}", "Top Commands".if_supports_color(Stdout, |t| t.bold()));
+        println!("{}", "─".repeat(42).if_supports_color(Stdout, |t| t.dimmed()));
+        println!("{}", format!("{:<14} {:>5}  {:>10}  {:>7}", "COMMAND", "RUNS", "SAVED", "SAVINGS").if_supports_color(Stdout, |t| t.bold()));
+        println!("{}", "─".repeat(42).if_supports_color(Stdout, |t| t.dimmed()));
         for (cmd, s) in cmd_rows.iter().take(8) {
             println!(
                 "{:<14} {:>5}  {:>10}  {:>6.1}%",

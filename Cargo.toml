@@ -13,4 +13,5 @@ toml        = "0.8"
 anyhow      = "1"
 thiserror   = "2"
 clap        = { version = "4", features = ["derive"] }
+owo-colors  = { version = "4", features = ["supports-colors"] }
 tiktoken-rs = "0.6"
