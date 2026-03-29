@@ -119,14 +119,13 @@ brew install ccr
 ccr init
 ```
 
-### From source (Linux)
+### Script (Linux / any platform)
 
 ```bash
-git clone https://github.com/AssafWoo/homebrew-ccr.git && cd homebrew-ccr
-cargo build --release
-cp target/release/ccr ~/.local/bin/
-ccr init
+curl -fsSL https://raw.githubusercontent.com/AssafWoo/homebrew-ccr/main/install.sh | bash
 ```
+
+The script installs Rust via `rustup` if needed, builds CCR from source with `cargo install`, adds `~/.cargo/bin` to your PATH, and runs `ccr init`. No prebuilt binaries — works on any architecture Rust supports.
 
 > **First run:** CCR downloads the BERT model (~90 MB, `all-MiniLM-L6-v2`) from HuggingFace and caches it at `~/.cache/huggingface/`. Subsequent runs are instant.
 

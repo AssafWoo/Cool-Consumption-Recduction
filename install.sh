@@ -1,64 +1,59 @@
 #!/usr/bin/env bash
+# CCR installer — builds from source via cargo (works on any Rust-supported platform).
+# macOS users can alternatively use: brew tap AssafWoo/ccr && brew install ccr
 set -e
 
-REPO="AssafWoo/homebrew-ccr"
-INSTALL_DIR="${CCR_INSTALL_DIR:-$HOME/.local/bin}"
+REPO_URL="https://github.com/AssafWoo/homebrew-ccr.git"
+CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
 
-# Detect platform
-OS=$(uname -s)
-ARCH=$(uname -m)
+# ── 1. Ensure Rust / cargo is available ───────────────────────────────────────
 
-case "$OS" in
-  Darwin)
-    case "$ARCH" in
-      arm64)  ASSET="ccr-macos-arm64" ;;
-      x86_64) ASSET="ccr-macos-x86_64" ;;
-      *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
-    esac
-    ;;
-  Linux)
-    case "$ARCH" in
-      x86_64) ASSET="ccr-linux-x86_64" ;;
-      *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
-    esac
-    ;;
-  *)
-    echo "Unsupported OS: $OS" >&2
-    exit 1
-    ;;
-esac
-
-# Resolve latest release tag
-echo "Fetching latest CCR release..."
-TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-
-if [ -z "$TAG" ]; then
-  echo "Could not determine latest release tag." >&2
-  exit 1
+if ! command -v cargo &>/dev/null; then
+  echo "Rust not found — installing rustup..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+  # Source cargo env for the rest of this script
+  # shellcheck source=/dev/null
+  source "$HOME/.cargo/env"
 fi
 
-URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
-echo "Downloading CCR $TAG for $OS/$ARCH..."
+# ── 2. Build and install ccr ──────────────────────────────────────────────────
 
-mkdir -p "$INSTALL_DIR"
-curl -fsSL "$URL" -o "$INSTALL_DIR/ccr"
-chmod +x "$INSTALL_DIR/ccr"
+echo "Building CCR from source (this takes ~1 min on first run)..."
+cargo install --git "$REPO_URL" --bin ccr --locked 2>&1
 
-# Ensure install dir is on PATH
-if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+# ── 3. Ensure ~/.cargo/bin is on PATH (shell rc files) ───────────────────────
+
+add_to_path() {
+  local rc="$1"
+  local line='export PATH="$HOME/.cargo/bin:$PATH"'
+  if [ -f "$rc" ] && ! grep -qF '.cargo/bin' "$rc"; then
+    echo "" >> "$rc"
+    echo "# Added by CCR installer" >> "$rc"
+    echo "$line" >> "$rc"
+    echo "  → Added cargo/bin to $rc"
+  fi
+}
+
+if ! echo "$PATH" | grep -q '.cargo/bin'; then
   echo ""
-  echo "Add $INSTALL_DIR to your PATH:"
-  echo '  export PATH="$HOME/.local/bin:$PATH"'
-  echo ""
+  echo "Adding ~/.cargo/bin to PATH in your shell config..."
+  add_to_path "$HOME/.bashrc"
+  add_to_path "$HOME/.zshrc"
+  add_to_path "$HOME/.profile"
+  export PATH="$CARGO_BIN:$PATH"
+  echo "  (effective now in this session)"
 fi
 
-echo "CCR $TAG installed to $INSTALL_DIR/ccr"
+# ── 4. Register Claude Code hooks ─────────────────────────────────────────────
+
 echo ""
-
-# Register Claude Code hooks
-if command -v ccr &>/dev/null || [ -x "$INSTALL_DIR/ccr" ]; then
-  "$INSTALL_DIR/ccr" init && echo "Claude Code hooks registered."
+if command -v ccr &>/dev/null; then
+  ccr init && echo "Claude Code hooks registered."
+elif [ -x "$CARGO_BIN/ccr" ]; then
+  "$CARGO_BIN/ccr" init && echo "Claude Code hooks registered."
 else
   echo "Run 'ccr init' to register Claude Code hooks."
 fi
+
+echo ""
+echo "CCR installed. Open a new terminal (or run: source ~/.cargo/env) and you're set."
