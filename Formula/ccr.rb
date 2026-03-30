@@ -2,7 +2,7 @@ class Ccr < Formula
   desc "LLM token optimizer for Claude Code — 60-90% token savings on dev operations"
   homepage "https://github.com/AssafWoo/homebrew-ccr"
   url "https://github.com/AssafWoo/homebrew-ccr/archive/refs/tags/v0.5.17.tar.gz"
-  sha256 "9b67a773e5088384fdf8fb4d72e290416f4d656be0842917b7251f4fdb7f83d4" # updated automatically by release CI
+  sha256 "74f2ee5c8b2217704860c8a9d77a18363b6b3298da28e943208fc72e9739a210"
   license "MIT"
   head "https://github.com/AssafWoo/homebrew-ccr.git", branch: "main"
 

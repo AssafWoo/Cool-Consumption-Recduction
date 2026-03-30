@@ -56,35 +56,22 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: main
 
-      - name: Compute source tarball SHA256
+      - name: Update formula
         run: |
           TAG="${GITHUB_REF_NAME}"
           URL="https://github.com/AssafWoo/homebrew-ccr/archive/refs/tags/${TAG}.tar.gz"
+
           # Retry up to 5 times — GitHub may take a moment to publish the tarball
           for i in $(seq 1 5); do
             SHA256=$(curl -fsSL "$URL" | sha256sum | awk '{print $1}')
             [ -n "$SHA256" ] && break
             sleep 5
           done
-          echo "RELEASE_SHA256=$SHA256" >> "$GITHUB_ENV"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
 
-      - name: Compute ORT SHA256s
-        run: |
-          ORT_VERSION="1.20.1"
-          ARM64_SHA=$(curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-arm64-${ORT_VERSION}.tgz" | sha256sum | awk '{print $1}')
-          X86_SHA=$(curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-x86_64-${ORT_VERSION}.tgz" | sha256sum | awk '{print $1}')
-          echo "ORT_ARM64_SHA=$ARM64_SHA" >> "$GITHUB_ENV"
-          echo "ORT_X86_SHA=$X86_SHA" >> "$GITHUB_ENV"
-
-      - name: Update formula
-        run: |
-          VERSION="${TAG#v}"
+          # Replace url and sha256 — matches whatever value is currently there
           sed -i \
-            -e "s|/archive/refs/tags/v[0-9.]*\.tar\.gz|/archive/refs/tags/${TAG}.tar.gz|g" \
-            -e "s|PLACEHOLDER_RELEASE_SHA256|${RELEASE_SHA256}|g" \
-            -e "s|PLACEHOLDER_ORT_ARM64_SHA256|${ORT_ARM64_SHA}|g" \
-            -e "s|PLACEHOLDER_ORT_X86_64_SHA256|${ORT_X86_SHA}|g" \
+            -e "s|url \".*homebrew-ccr.*\"|url \"$URL\"|" \
+            -e "s|sha256 \"[a-f0-9]*\"|sha256 \"$SHA256\"|" \
             Formula/ccr.rb
 
       - name: Commit and push formula
