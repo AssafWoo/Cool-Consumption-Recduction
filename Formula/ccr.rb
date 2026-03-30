@@ -25,9 +25,17 @@ class Ccr < Formula
     end
   end
 
+  def post_install
+    # Pre-download the BERT model and register Claude Code hooks automatically.
+    # Runs as the installing user so ~/.cache and ~/.claude are correct.
+    # quiet_system — don't fail the install if Claude Code isn't set up yet.
+    quiet_system bin/"ccr", "init"
+  end
+
   def caveats
     <<~EOS
-      Register CCR with Claude Code:
+      CCR setup runs automatically during install (hooks + BERT model download).
+      If you see Claude Code hook errors, run manually:
         ccr init
     EOS
   end
