@@ -1,6 +1,6 @@
 [package]
 name = "ccr"
-version = "0.5.15"
+version = "0.5.17"
 edition = "2021"
 
 [[bin]]
