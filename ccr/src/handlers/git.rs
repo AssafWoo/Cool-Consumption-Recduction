@@ -163,9 +163,11 @@ fn filter_log(output: &str) -> String {
 // ─── diff ────────────────────────────────────────────────────────────────────
 
 /// Hard cap per hunk and across the whole diff.
-const HUNK_LINE_CAP: usize = 30;
+const HUNK_LINE_CAP: usize = 20;
 /// Total line budget for the whole diff output.
-const DIFF_TOTAL_CAP: usize = 200;
+/// Kept below BERT_MIN_LINES (≈15 tokens) for typical small diffs so BERT is skipped.
+/// Large diffs still trigger BERT but with a much smaller input.
+const DIFF_TOTAL_CAP: usize = 60;
 /// Maximum context lines kept on each side of a changed block.
 const MAX_CONTEXT_PER_SIDE: usize = 2;
 

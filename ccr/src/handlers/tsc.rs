@@ -1,6 +1,16 @@
+use std::sync::OnceLock;
+
 use super::Handler;
 
 pub struct TscHandler;
+
+fn re_ts_error() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^(.+\.tsx?)\((\d+),\d+\):\s+(error|warning)\s+(TS\d+:.+)$")
+            .expect("tsc error regex")
+    })
+}
 
 /// Maximum length for a TypeScript error message before truncation.
 /// TypeScript emits very verbose type mismatch descriptions; trim them to keep context.
@@ -20,11 +30,8 @@ impl Handler for TscHandler {
         // Group errors/warnings by file
         // Lines like: src/foo.ts(42,5): error TS2345: ...
         let mut grouped: Vec<(String, Vec<(String, String, String)>)> = Vec::new(); // (file, [(lineno, kind, msg)])
-        let ts_re = regex::Regex::new(r"^(.+\.tsx?)\((\d+),\d+\):\s+(error|warning)\s+(TS\d+:.+)$")
-            .unwrap();
-
         for line in &lines {
-            if let Some(caps) = ts_re.captures(line) {
+            if let Some(caps) = re_ts_error().captures(line) {
                 let file = caps[1].to_string();
                 let lineno = caps[2].to_string();
                 let kind = caps[3].to_string();

@@ -1,6 +1,13 @@
+use std::sync::OnceLock;
+
 use super::Handler;
 
 pub struct CargoHandler;
+
+fn re_clippy_rule() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\[(\w+)\]").expect("cargo clippy rule regex"))
+}
 
 impl Handler for CargoHandler {
     fn rewrite_args(&self, args: &[String]) -> Vec<String> {
@@ -39,15 +46,13 @@ fn group_clippy_warnings(warnings: &[String]) -> Vec<String> {
         return warnings.iter().map(|w| format!("  {}", w)).collect();
     }
 
-    let rule_re = regex::Regex::new(r"\[(\w+)\]").unwrap();
-
     // Collect (rule_name, original_warning_line) pairs; ungrouped warnings kept as-is.
     let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     let mut ungrouped: Vec<String> = Vec::new();
 
     for w in warnings {
-        if let Some(cap) = rule_re.captures(w) {
+        if let Some(cap) = re_clippy_rule().captures(w) {
             let rule = cap[1].to_string();
             grouped.entry(rule).or_default().push(w.clone());
         } else {
@@ -61,9 +66,9 @@ fn group_clippy_warnings(warnings: &[String]) -> Vec<String> {
         out.push(format!("[{} \u{d7}{}]", rule, lines.len()));
         for loc in lines.iter().take(3) {
             // Extract location part: text after last `]` or the full line
-            let location = rule_re
+            let location = re_clippy_rule()
                 .find(loc)
-                .map(|m| loc[m.end()..].trim())
+                .map(|m: regex::Match| loc[m.end()..].trim())
                 .unwrap_or(loc.trim());
             if !location.is_empty() {
                 out.push(format!("    {}", location));
