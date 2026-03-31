@@ -137,4 +137,7 @@ jobs:
           git add Formula/ccr.rb
           git diff --cached --quiet && echo "No formula changes" && exit 0
           git commit -m "chore: update formula for ${GITHUB_REF_NAME}"
+          # Pull any commits that landed since checkout (e.g. another push to main)
+          # before pushing to avoid rejection.
+          git pull --rebase origin main
           git push origin HEAD:main
