@@ -1,0 +1,21 @@
+command_hint = "git"
+
+[[questions]]
+question = "Which files were changed in this diff?"
+key_facts = ["token.rs", "routes.rs", "config.rs", "auth_test.rs"]
+
+[[questions]]
+question = "What was the typo that was fixed in token.rs?"
+key_facts = ["expire_at", "expires_at"]
+
+[[questions]]
+question = "What new API route was added?"
+key_facts = ["/api/v2/metrics"]
+
+[[questions]]
+question = "What was the value of max_retries changed to?"
+key_facts = ["5"]
+
+[[questions]]
+question = "What is the name of the new function added in token.rs?"
+key_facts = ["refresh_with_retry"]

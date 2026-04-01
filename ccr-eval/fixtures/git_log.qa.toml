@@ -1,0 +1,17 @@
+command_hint = "git"
+
+[[questions]]
+question = "What is the hash of the most recent commit?"
+key_facts = ["f1a7b3c"]
+
+[[questions]]
+question = "What commit fixed the race condition in auth token refresh?"
+key_facts = ["a3f9c21"]
+
+[[questions]]
+question = "What hash added the prometheus metrics endpoint?"
+key_facts = ["d8b2e05"]
+
+[[questions]]
+question = "How many total commits are shown in the log?"
+key_facts = ["55", "fifty-five"]

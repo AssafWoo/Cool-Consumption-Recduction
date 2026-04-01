@@ -121,6 +121,33 @@ impl SessionState {
             })
     }
 
+    /// Check if the most recent run of this command produced exactly the same
+    /// output.  Used for state commands (git, kubectl, …) where semantic
+    /// similarity is unreliable — two different states can have near-identical
+    /// embeddings while the actual content has changed.
+    pub fn find_exact(&self, cmd: &str, content: &str) -> Option<SessionHit> {
+        let now = now_secs();
+        self.entries
+            .iter()
+            .filter(|e| e.cmd == cmd)
+            .rev()
+            .find_map(|e| {
+                let stored = e
+                    .state_content
+                    .as_deref()
+                    .unwrap_or(&e.content_preview);
+                if stored == content {
+                    Some(SessionHit {
+                        turn: e.turn,
+                        age_secs: now.saturating_sub(e.ts),
+                        tokens_saved: e.tokens,
+                    })
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Record a new output entry, evicting the oldest if over capacity.
     /// `is_state`: if true (state commands like git, kubectl), stores the full
     /// content in `state_content` for accurate line-level delta beyond 4000 chars.

@@ -280,6 +280,25 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
+/// Returns true when a mutating git operation is currently in progress
+/// (cherry-pick, merge, rebase, am/apply).  Uses only filesystem stats —
+/// no subprocess, no latency.
+pub fn mid_git_operation() -> bool {
+    let Ok(mut dir) = std::env::current_dir() else { return false };
+    loop {
+        let git = dir.join(".git");
+        if git.exists() {
+            return git.join("CHERRY_PICK_HEAD").exists()
+                || git.join("MERGE_HEAD").exists()
+                || git.join("rebase-merge").exists()
+                || git.join("rebase-apply").exists();
+        }
+        if !dir.pop() {
+            return false;
+        }
+    }
+}
+
 /// Compact a file path longer than `max_len` chars to "prefix/.../filename".
 pub fn compact_path(path: &str, max_len: usize) -> String {
     if path.len() <= max_len {
@@ -303,6 +322,13 @@ pub fn compact_path(path: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mid_git_operation_false_outside_git() {
+        // In a normal test environment there is no CHERRY_PICK_HEAD etc.
+        // We can only assert it doesn't panic and returns a bool.
+        let _ = mid_git_operation(); // must not panic
+    }
 
     // ── json_to_schema ────────────────────────────────────────────────────────
 

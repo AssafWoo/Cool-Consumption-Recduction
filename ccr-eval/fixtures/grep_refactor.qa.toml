@@ -1,0 +1,17 @@
+command_hint = "grep"
+
+[[questions]]
+question = "In how many files does getUserById appear?"
+key_facts = ["12", "twelve"]
+
+[[questions]]
+question = "How many times does getUserById appear in src/tests/user_test.rs?"
+key_facts = ["12", "twelve"]
+
+[[questions]]
+question = "Does getUserById appear in src/reports/audit.rs?"
+key_facts = ["yes", "audit.rs", "audit"]
+
+[[questions]]
+question = "At what line in src/api/users.rs does getUserById first appear?"
+key_facts = ["23"]

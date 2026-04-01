@@ -138,7 +138,7 @@ fn filter_log(output: &str) -> String {
             let msg = l.splitn(2, ' ').nth(1).unwrap_or("");
             !TRAILERS.iter().any(|t| msg.trim_start().starts_with(t))
         })
-        .take(20)
+        .take(50)
         .collect();
 
     let total = output.lines().count();
@@ -154,8 +154,8 @@ fn filter_log(output: &str) -> String {
         })
         .collect();
 
-    if total > 20 {
-        result.push(format!("[+{} more commits]", total - 20));
+    if total > 50 {
+        result.push(format!("[+{} more commits]", total - 50));
     }
     result.join("\n")
 }
@@ -172,6 +172,9 @@ const DIFF_TOTAL_CAP: usize = 60;
 const MAX_CONTEXT_PER_SIDE: usize = 2;
 
 fn filter_diff(output: &str) -> String {
+    if crate::handlers::util::mid_git_operation() {
+        return output.to_string();
+    }
     let lines: Vec<&str> = output.lines().collect();
     let mut out: Vec<String> = Vec::new();
 
@@ -357,14 +360,33 @@ fn filter_push_pull(output: &str) -> String {
     }
 
     if has_error {
-        let errors: Vec<&str> = output
-            .lines()
-            .filter(|l| {
-                let t = l.trim().to_lowercase();
-                PUSH_PULL_ERROR_TERMS.iter().any(|e| t.contains(e))
-            })
-            .collect();
-        return errors.join("\n");
+        let lines: Vec<&str> = output.lines().collect();
+        let n = lines.len();
+        let mut keep = vec![false; n];
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim().to_lowercase();
+            if PUSH_PULL_ERROR_TERMS.iter().any(|e| t.contains(e)) {
+                let start = i.saturating_sub(2);
+                let end = (i + 2).min(n.saturating_sub(1));
+                for j in start..=end {
+                    keep[j] = true;
+                }
+            }
+        }
+        let mut result: Vec<String> = Vec::new();
+        let mut last_kept: Option<usize> = None;
+        for (i, &k) in keep.iter().enumerate() {
+            if k {
+                if let Some(last) = last_kept {
+                    if last + 1 < i {
+                        result.push("...".to_string());
+                    }
+                }
+                result.push(lines[i].to_string());
+                last_kept = Some(i);
+            }
+        }
+        return result.join("\n");
     }
 
     // Success — find the branch ref line: "main -> origin/main" or "branch 'main' set up to track..."
@@ -547,6 +569,19 @@ mod tests {
         let result = filter_push_pull(output);
         assert_ne!(result, "ok (up to date)");
         assert!(result.contains("error:"));
+        // context lines within 2 of the error should also be kept
+        assert!(result.contains("Everything up-to-date"));
+    }
+
+    #[test]
+    fn test_push_error_includes_context_lines() {
+        let output = "remote: some preamble\nremote: branch protection rule\nerror: failed to push some refs\nremote: see https://example.com for info\nremote: trailing noise\n";
+        let result = filter_push_pull(output);
+        assert!(result.contains("error:"), "error line kept");
+        // The 2 lines before the error should be included
+        assert!(result.contains("branch protection rule"), "context before error kept");
+        // The 2 lines after the error should be included
+        assert!(result.contains("see https://example.com"), "context after error kept");
     }
 
     #[test]

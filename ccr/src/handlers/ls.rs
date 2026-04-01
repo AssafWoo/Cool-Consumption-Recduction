@@ -46,7 +46,15 @@ impl Handler for LsHandler {
             parse_short_format(&lines)
         };
 
-        // Filter out noise directories/files
+        // Filter out noise directories/files, but remember what was hidden
+        // so Claude knows they exist.
+        let mut hidden: Vec<String> = raw_entries
+            .iter()
+            .filter(|e| NOISE_DIRS.contains(&e.name.as_str()))
+            .map(|e| e.name.clone())
+            .collect();
+        hidden.sort();
+
         let entries: Vec<LsEntry> = raw_entries
             .into_iter()
             .filter(|e| !NOISE_DIRS.contains(&e.name.as_str()))
@@ -89,6 +97,10 @@ impl Handler for LsHandler {
         let ext_summary = build_ext_summary(&files);
         if let Some(s) = ext_summary {
             out.push(s);
+        }
+
+        if !hidden.is_empty() {
+            out.push(format!("[hidden: {}]", hidden.join(", ")));
         }
 
         out.join("\n")
@@ -166,7 +178,9 @@ mod tests {
     fn test_node_modules_filtered_out() {
         let output = "src/\nnode_modules/\npackage.json\nREADME.md\n";
         let result = run_filter(output);
-        assert!(!result.contains("node_modules"), "node_modules should be filtered, got: {}", result);
+        // node_modules must not appear as a regular entry, but may appear in [hidden: ...] note
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(!lines.iter().any(|l| *l == "node_modules/"), "node_modules/ must not appear as entry, got: {}", result);
         assert!(result.contains("src/"), "src/ should be present, got: {}", result);
         assert!(result.contains("package.json"), "package.json should be present, got: {}", result);
     }
@@ -175,14 +189,18 @@ mod tests {
     fn test_git_filtered_out() {
         let output = ".git/\nsrc/\nmain.rs\n";
         let result = run_filter(output);
-        assert!(!result.contains(".git"), "got: {}", result);
+        // .git must not appear as a regular entry line
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(!lines.iter().any(|l| *l == ".git/"), "got: {}", result);
     }
 
     #[test]
     fn test_target_filtered_out() {
         let output = "target/\nsrc/\nCargo.toml\n";
         let result = run_filter(output);
-        assert!(!result.contains("target"), "got: {}", result);
+        // target must not appear as a regular entry line
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(!lines.iter().any(|l| *l == "target/"), "got: {}", result);
     }
 
     #[test]
@@ -209,5 +227,17 @@ mod tests {
         let result = run_filter(output);
         assert!(result.contains("main.rs"), "got: {}", result);
         assert!(result.contains("[0 dirs, 3 files]"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_hidden_dirs_note_appended() {
+        let output = "src/\nnode_modules/\ntarget/\npackage.json\n";
+        let result = run_filter(output);
+        assert!(result.contains("[hidden:"), "should have hidden note, got: {}", result);
+        assert!(result.contains("node_modules"), "node_modules should appear in hidden note, got: {}", result);
+        assert!(result.contains("target"), "target should appear in hidden note, got: {}", result);
+        // They must NOT appear as regular entries
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(!lines.iter().any(|l| *l == "node_modules/" || *l == "target/"), "noise dirs must not appear as entries");
     }
 }

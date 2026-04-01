@@ -1,0 +1,17 @@
+command_hint = "git"
+
+[[questions]]
+question = "Why was the push rejected?"
+key_facts = ["protected branch", "GH006"]
+
+[[questions]]
+question = "What required status check has not passed?"
+key_facts = ["ci/run-tests"]
+
+[[questions]]
+question = "How many required approving reviews are missing?"
+key_facts = ["2", "two"]
+
+[[questions]]
+question = "Which branch was the push attempted on?"
+key_facts = ["main"]

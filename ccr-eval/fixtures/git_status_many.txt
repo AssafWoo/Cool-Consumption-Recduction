@@ -1,0 +1,41 @@
+On branch feature/billing-v2
+Your branch is ahead of 'origin/feature/billing-v2' by 3 commits.
+  (use "git push" to publish your local commits)
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   src/billing/invoice.rs
+	modified:   src/billing/invoice_pdf.rs
+	modified:   src/billing/line_item.rs
+	new file:   src/payments/stripe_client.rs
+	new file:   src/payments/stripe_types.rs
+	new file:   src/payments/webhook_handler.rs
+	modified:   src/models/subscription.rs
+	modified:   src/models/customer.rs
+	new file:   migrations/0042_add_subscription_table.sql
+	new file:   migrations/0043_add_payment_methods_table.sql
+	modified:   src/api/billing_routes.rs
+	modified:   src/api/subscription_routes.rs
+	new file:   src/api/payment_routes.rs
+	new file:   src/services/billing_service.rs
+	modified:   src/services/user_service.rs
+	modified:   src/config/billing.rs
+	new file:   src/jobs/invoice_scheduler.rs
+	modified:   src/jobs/cleanup.rs
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/legacy/old_auth.rs
+	modified:   src/legacy/old_billing.rs
+	modified:   src/db/connection.rs
+	modified:   src/middleware/logging.rs
+	modified:   src/utils/crypto.rs
+	modified:   Cargo.lock
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	temp_debug.log
+	src/scratch/stripe_playground.rs
+	design_notes.txt
+	.env.local

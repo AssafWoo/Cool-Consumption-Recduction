@@ -1,0 +1,55 @@
+f1a7b3c chore: bump version to 2.4.1
+3e8d1a2 fix: handle null response in user profile fetch
+7c2f4b9 refactor: extract token validation into separate module
+9a1e6c3 docs: update API authentication guide
+2b5f8d1 test: add coverage for edge cases in session expiry
+4d7c3e9 feat: support custom timeout per request
+8f2a1b6 fix: correct off-by-one in pagination cursor
+6c9e4d2 chore: update dependencies to latest patch versions
+1a8b5f3 refactor: simplify error handling in middleware chain
+5e3c7a4 fix: prevent double-encoding of URL query params
+b9d2f1e feat: add support for OAuth2 PKCE flow
+0f4a8c7 chore: remove deprecated v1 API endpoints
+7b1e5d9 test: integration tests for billing webhook handler
+3a6c2f8 fix: correct timezone handling in scheduled jobs
+9d4b7e1 feat: expose user preferences in profile API
+e2f1a9c refactor: move shared types to common crate
+4c8d3b5 fix: avoid panic on malformed JWT signature
+6f9e2a1 docs: add runbook for on-call incident response
+1b7c4d8 chore: configure dependabot for weekly updates
+8e5f3c2 test: unit tests for rate limiter backoff logic
+c3a1b9e feat: implement request deduplication cache
+7f4d2e6 fix: restore missing index on users.email column
+a3f9c21 fix: resolve race condition in auth token refresh
+2e8b5a3 chore: upgrade tokio to 1.35.1
+9c1f4d7 refactor: consolidate database connection pool setup
+4b6e8c2 feat: add structured logging with tracing subscriber
+0d3a7f9 fix: handle HTTP 429 with exponential backoff
+5f1c9b4 docs: document retry policy for external API calls
+8a4e2d1 refactor: split user service into read and write paths
+3c7b6f5 feat: add health check endpoint with dependency status
+e1d4a8c fix: correct escaping in SQL template literals
+6b9f3e7 chore: clean up unused feature flags from config
+2f5a1d4 test: add snapshot tests for API response shapes
+9e8c4b2 feat: support webhook signature verification
+1d3f7a6 fix: prevent session fixation on privilege escalation
+7a2c5e8 refactor: replace manual retries with retry crate
+4f9b1d3 docs: add architecture diagram to contributing guide
+0c6e8a5 chore: enable stricter clippy lints
+3b1d4f7 test: property-based tests for token generation
+8c5a9e2 fix: memory leak in long-running background worker
+e4f2b6d feat: add admin endpoint for cache invalidation
+1a9c3f8 refactor: move auth logic out of request handlers
+6e7b2d4 fix: correct content-type for binary file downloads
+d8b2e05 feat: add prometheus metrics endpoint
+2c4a8f1 chore: pin rust toolchain to 1.75.0
+9b3e1c6 fix: handle graceful shutdown during in-flight requests
+5d7f4a2 refactor: use Arc<RwLock> for shared config state
+0a8c6b9 feat: add /readyz endpoint for Kubernetes probes
+4e1f9d3 docs: update deployment checklist for v2.4
+7c3b5a8 fix: correct CORS headers for preflight requests
+2f6e4d1 chore: add git hooks for pre-commit linting
+8b9a2c5 test: load test scenario for concurrent token refresh
+3d5f1e7 feat: implement audit log for sensitive operations
+e6c2b4a fix: avoid duplicate event emission on retry
+9f4d8c1 chore: archive obsolete migration scripts

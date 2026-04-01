@@ -35,6 +35,35 @@ pub fn rewrite_command(command: &str) -> Option<String> {
     rewrite_single(command)
 }
 
+/// Returns true if `command` contains a stdout redirect operator (`>` or `>>`)
+/// outside of single or double quotes.
+///
+/// Commands with redirects write their output to a file.  Wrapping them with
+/// `ccr run` would cause CCR's dedup/delta annotations to be written into the
+/// file instead of the real content, corrupting it.
+fn has_stdout_redirect(command: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = command.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => { in_single = !in_single; }
+            b'"'  if !in_single => { in_double = !in_double; }
+            b'>'  if !in_single && !in_double => {
+                // Exclude '->' and '=>' (not a redirect)
+                let prev = if i > 0 { bytes[i - 1] } else { b' ' };
+                if prev != b'-' && prev != b'=' {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Rewrite a single (non-compound) command.
 /// Uses the handler's `rewrite_args` to inject flags (e.g. --message-format json)
 /// so the rewritten command string reflects the actual args that will be run.
@@ -43,6 +72,13 @@ fn rewrite_single(command: &str) -> Option<String> {
 
     // Don't double-wrap
     if trimmed.starts_with("ccr run ") || trimmed == "ccr run" {
+        return None;
+    }
+
+    // Never wrap commands that redirect stdout to a file.
+    // CCR's dedup/delta annotations would be written into the file instead of
+    // the real command output, corrupting it (e.g. `git show branch:file > f.py`).
+    if has_stdout_redirect(trimmed) {
         return None;
     }
 
@@ -153,5 +189,48 @@ mod tests {
         // No known commands → no rewrite
         let result = rewrite_command("tool-a && tool-b");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn redirect_bare() {
+        assert!(has_stdout_redirect("git show HEAD:src/main.rs > main.rs"));
+    }
+
+    #[test]
+    fn redirect_append() {
+        assert!(has_stdout_redirect("cargo build >> build.log"));
+    }
+
+    #[test]
+    fn redirect_inside_single_quotes_not_detected() {
+        // > inside quotes is not a redirect
+        assert!(!has_stdout_redirect("echo 'a > b'"));
+    }
+
+    #[test]
+    fn redirect_inside_double_quotes_not_detected() {
+        assert!(!has_stdout_redirect("echo \"a > b\""));
+    }
+
+    #[test]
+    fn arrow_operators_not_redirect() {
+        // -> and => in code snippets / descriptions must not trigger
+        assert!(!has_stdout_redirect("git log --format='%H -> %s'"));
+        assert!(!has_stdout_redirect("some-tool => output"));
+    }
+
+    #[test]
+    fn git_show_redirect_not_wrapped() {
+        // git show with redirect must not be wrapped — would corrupt the output file
+        let result = rewrite_command("git show origin/main:src/lib.rs > /tmp/lib.rs");
+        assert_eq!(result, None, "should not wrap a redirected command");
+    }
+
+    #[test]
+    fn git_show_no_redirect_still_wrapped() {
+        // git show without redirect should still be wrapped normally
+        let result = rewrite_command("git show HEAD");
+        assert!(result.is_some(), "should wrap git show without redirect");
+        assert!(result.unwrap().starts_with("ccr run git show"));
     }
 }

@@ -1,0 +1,17 @@
+command_hint = "git"
+
+[[questions]]
+question = "Is src/billing/invoice.rs staged for commit?"
+key_facts = ["yes", "staged", "modified"]
+
+[[questions]]
+question = "What migration file is being added?"
+key_facts = ["0042", "subscription"]
+
+[[questions]]
+question = "Is src/legacy/old_auth.rs staged or unstaged?"
+key_facts = ["unstaged", "not staged", "modified"]
+
+[[questions]]
+question = "How many files are staged for commit?"
+key_facts = ["18", "eighteen"]

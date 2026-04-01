@@ -1,0 +1,13 @@
+Enumerating objects: 14, done.
+Counting objects: 100% (14/14), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (8/8), done.
+Writing objects: 100% (9/9), 2.31 KiB | 2.31 MiB/s, done.
+Total 9 (delta 5), reused 0 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (5/5), completed with 4 local objects.
+remote: error: GH006: Protected branch update failed for refs/heads/main.
+remote: error: Required status check "ci/run-tests" has not passed.
+remote: error: Merging is blocked: 2 required approving reviews missing.
+To github.com:acme/backend.git
+ ! [remote rejected] main -> main (protected branch hook declined)
+error: failed to push some refs to 'github.com:acme/backend.git'

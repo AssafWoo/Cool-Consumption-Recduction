@@ -7,6 +7,9 @@ pub struct DiffHandler;
 
 impl Handler for DiffHandler {
     fn filter(&self, output: &str, _args: &[String]) -> String {
+        if crate::handlers::util::mid_git_operation() {
+            return output.to_string();
+        }
         let mut out: Vec<String> = Vec::new();
         let mut hunk_count: usize = 0;
         let mut in_hunk = false;

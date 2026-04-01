@@ -1,0 +1,115 @@
+diff --git a/src/auth/token.rs b/src/auth/token.rs
+index 4a1b2c3..9f8e7d6 100644
+--- a/src/auth/token.rs
++++ b/src/auth/token.rs
+@@ -41,6 +41,18 @@ impl TokenManager {
+     pub fn refresh(&self, token: &str) -> Result<Token> {
+         self.validate(token)?;
+         self.issue_new(token)
++    }
++
++    pub fn refresh_with_retry(&self, token: &str, max_attempts: u32) -> Result<Token> {
++        let mut attempts = 0;
++        loop {
++            match self.refresh(token) {
++                Ok(t) => return Ok(t),
++                Err(e) if attempts < max_attempts => {
++                    attempts += 1;
++                    let delay = Duration::from_millis(100 * 2u64.pow(attempts));
++                    std::thread::sleep(delay);
++                }
++                Err(e) => return Err(e),
++            }
++        }
+     }
+
+     pub fn revoke(&self, token: &str) -> Result<()> {
+@@ -89,7 +101,7 @@ impl TokenManager {
+     fn build_claims(&self, subject: &str, ttl: u64) -> Claims {
+         Claims {
+             sub: subject.to_string(),
+-            expire_at: self.now() + ttl,
++            expires_at: self.now() + ttl,
+             iat: self.now(),
+             jti: Uuid::new_v4().to_string(),
+         }
+diff --git a/src/api/routes.rs b/src/api/routes.rs
+index b3c4d5e..1a2b3c4 100644
+--- a/src/api/routes.rs
++++ b/src/api/routes.rs
+@@ -28,6 +28,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
+         .service(web::resource("/api/v2/users").route(web::get().to(list_users)))
+         .service(web::resource("/api/v2/users/{id}").route(web::get().to(get_user)))
+         .service(web::resource("/api/v2/auth/refresh").route(web::post().to(refresh_token)))
++        .service(web::resource("/api/v2/metrics").route(web::get().to(metrics_handler)))
+         .service(web::resource("/api/v2/health").route(web::get().to(health_check)));
+ }
+
+diff --git a/src/config.rs b/src/config.rs
+index 2e3f4a5..7b8c9d0 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -14,7 +14,7 @@ pub struct AppConfig {
+     pub db_pool_size: u32,
+     pub request_timeout_ms: u64,
+     pub jwt_secret: String,
+-    pub max_retries: u32,  // default: 3
++    pub max_retries: u32,  // default: 5
+ }
+
+ impl Default for AppConfig {
+@@ -24,7 +24,7 @@ impl Default for AppConfig {
+             db_pool_size: 10,
+             request_timeout_ms: 5000,
+             jwt_secret: String::new(),
+-            max_retries: 3,
++            max_retries: 5,
+         }
+     }
+ }
+diff --git a/tests/auth_test.rs b/tests/auth_test.rs
+index 5f6a7b8..3c4d5e6 100644
+--- a/tests/auth_test.rs
++++ b/tests/auth_test.rs
+@@ -87,6 +87,42 @@ mod token_tests {
+         assert!(result.is_err());
+     }
+
++    #[test]
++    fn test_refresh_with_retry_succeeds_on_first_attempt() {
++        let mgr = TokenManager::new_test();
++        let token = mgr.issue_test_token("user-42");
++        let result = mgr.refresh_with_retry(&token, 3);
++        assert!(result.is_ok());
++        assert_ne!(result.unwrap().raw, token);
++    }
++
++    #[test]
++    fn test_refresh_with_retry_retries_on_transient_failure() {
++        let mgr = TokenManager::new_failing(2);
++        let token = mgr.issue_test_token("user-99");
++        let result = mgr.refresh_with_retry(&token, 3);
++        assert!(result.is_ok(), "expected success after retries");
++        assert_eq!(mgr.attempt_count(), 3);
++    }
++
++    #[test]
++    fn test_refresh_with_retry_exhausts_attempts() {
++        let mgr = TokenManager::new_always_failing();
++        let token = mgr.issue_test_token("user-7");
++        let result = mgr.refresh_with_retry(&token, 2);
++        assert!(result.is_err());
++        assert_eq!(mgr.attempt_count(), 3);
++    }
++
++    #[test]
++    fn test_refresh_with_retry_zero_max_attempts() {
++        let mgr = TokenManager::new_failing(1);
++        let token = mgr.issue_test_token("user-3");
++        let result = mgr.refresh_with_retry(&token, 0);
++        assert!(result.is_err(), "should fail immediately with zero retries");
++    }
++
+     #[test]
+     fn test_revoke_invalidates_token() {
+         let mgr = TokenManager::new_test();

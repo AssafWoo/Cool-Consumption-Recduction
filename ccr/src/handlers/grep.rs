@@ -44,8 +44,8 @@ impl Handler for GrepHandler {
         let file_count = by_file.len();
         let mut out: Vec<String> = Vec::new();
         let mut shown = 0;
-        const LIMIT: usize = 50;
-        const PER_FILE_LIMIT: usize = 25;
+        const LIMIT: usize = 200;
+        const PER_FILE_LIMIT: usize = 100;
 
         'outer: for (file, matches) in &by_file {
             out.push(format!("{}:", compact_path(&file)));
@@ -148,14 +148,14 @@ mod tests {
     #[test]
     fn test_per_file_limit_of_25() {
         let handler = GrepHandler;
-        // Build output with 30 matches in one file
-        let lines: Vec<String> = (0..30)
+        // Build output with 110 matches in one file (new limit is 100)
+        let lines: Vec<String> = (0..110)
             .map(|i| format!("src/main.rs:{}:match here", i + 1))
             .collect();
         let output = lines.join("\n");
         let result = handler.filter(&output, &[]);
         assert!(
-            result.contains("[+5 more in this file]"),
+            result.contains("[+10 more in this file]"),
             "expected per-file overflow message, got: {}",
             result
         );

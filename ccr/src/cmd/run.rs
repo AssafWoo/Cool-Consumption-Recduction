@@ -151,9 +151,20 @@ pub fn run(args: Vec<String>) -> Result<()> {
         store.save(key);
     }
 
+    // CR: content-retrieval subcommands (git show, git cat-file, etc.) must never have
+    // dedup/delta annotations injected — their output is typically piped or redirected
+    // to a file, and annotations would corrupt it.
+    let is_content_retrieval = cmd_name == "git"
+        && matches!(
+            subcommand.as_deref(),
+            Some("show") | Some("cat-file") | Some("archive") | Some("bundle")
+        );
+
     // Idea 3: Delta compression — suppress lines seen in a prior run of the same command.
     // Skip for short outputs (< 20 lines) where delta overhead exceeds savings.
-    let filtered = if filtered.lines().count() >= 20 {
+    let filtered = if is_content_retrieval {
+        filtered
+    } else if filtered.lines().count() >= 20 {
         if let Ok(mut embs) = ccr_core::summarizer::embed_batch(&[filtered.as_str()]) {
             if let Some(emb) = embs.pop() {
                 let sid_pre = crate::session::session_id();
@@ -184,9 +195,12 @@ pub fn run(args: Vec<String>) -> Result<()> {
 
     // B3: Session cache — check for semantically identical prior output, record new one.
     // Skip for short outputs: the dedup message itself would be longer than the original.
+    // Skip for content-retrieval subcommands: annotations must not appear in raw content.
     let sid = crate::session::session_id();
     let mut session = crate::session::SessionState::load(&sid);
-    let filtered = if ccr_core::tokens::count_tokens(&filtered) < 30 {
+    let filtered = if is_content_retrieval {
+        filtered
+    } else if ccr_core::tokens::count_tokens(&filtered) < 30 {
         let tokens = ccr_core::tokens::count_tokens(&filtered);
         if let Ok(mut embs) = ccr_core::summarizer::embed_batch(&[filtered.as_str()]) {
             if let Some(emb) = embs.pop() {
@@ -199,7 +213,16 @@ pub fn run(args: Vec<String>) -> Result<()> {
         ccr_core::summarizer::embed_batch(&[filtered.as_str()])
     {
         if let Some(emb) = embeddings.pop() {
-            if let Some(hit) = session.find_similar(&delta_key, &emb) {
+            // State commands (git, kubectl, etc.) use exact-content dedup:
+            // two different git states can embed at >0.92 similarity while the
+            // actual output has changed. Semantic dedup is only safe for
+            // non-state commands (build output, test results, etc.).
+            let hit = if is_state {
+                session.find_exact(&delta_key, &filtered)
+            } else {
+                session.find_similar(&delta_key, &emb)
+            };
+            if let Some(hit) = hit {
                 let age = crate::session::format_age(hit.age_secs);
                 format!(
                     "[same output as turn {} ({} ago) — {} tokens saved]",
