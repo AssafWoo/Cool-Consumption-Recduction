@@ -105,8 +105,8 @@ fn check_hook_script(script: &Path, any_error: &mut bool) -> Option<PathBuf> {
     if !script.exists() {
         err(
             "Hook script",
-            "NOT found",
-            "ccr init",
+            "NOT found — commands won't be rewritten",
+            "run: ccr init   then restart Claude Code",
             any_error,
         );
         return None;
@@ -158,8 +158,8 @@ fn check_settings(settings: &Path, any_error: &mut bool) {
     if !settings.exists() {
         err(
             "settings.json",
-            "NOT found",
-            "ccr init",
+            "NOT found — hooks will never fire",
+            "run: ccr init   then restart Claude Code",
             any_error,
         );
         return;
@@ -181,8 +181,8 @@ fn check_settings(settings: &Path, any_error: &mut bool) {
     } else {
         err(
             "settings.json PreToolUse",
-            "ccr-rewrite.sh NOT registered",
-            "ccr init",
+            "NOT registered — commands won't be rewritten",
+            "run: ccr init   then restart Claude Code",
             any_error,
         );
     }
@@ -192,8 +192,8 @@ fn check_settings(settings: &Path, any_error: &mut bool) {
     } else {
         err(
             "settings.json PostToolUse",
-            "ccr hook NOT registered",
-            "ccr init",
+            "NOT registered — output won't be filtered",
+            "run: ccr init   then restart Claude Code",
             any_error,
         );
     }
@@ -232,9 +232,19 @@ fn check_analytics(any_error: &mut bool) {
     if !db_path.exists() {
         err(
             "DB",
-            "NOT created yet",
-            "ask Claude Code to run a command (e.g. 'run git status')",
+            "NOT created yet — ccr run has never been called",
+            "test now:  ccr run git status",
             any_error,
+        );
+        println!(
+            "     {:<28} {}",
+            "",
+            "then re-run 'ccr doctor' — DB should appear and show 1 record".if_supports_color(Stdout, |t| t.dimmed()),
+        );
+        println!(
+            "     {:<28} {}",
+            "",
+            "if DB still missing after that, check file permissions on the path above".if_supports_color(Stdout, |t| t.dimmed()),
         );
         return;
     }
@@ -244,11 +254,16 @@ fn check_analytics(any_error: &mut bool) {
         Ok(records) => {
             let total = records.len();
             if total == 0 {
-                warn("DB records", "0 records — no commands run through CCR yet");
+                warn("DB records", "0 records — ccr run never succeeded");
                 println!(
                     "     {:<28} {}",
                     "",
-                    "ask Claude Code to run a command, then re-check".if_supports_color(Stdout, |t| t.yellow()),
+                    "test:  ccr run git status   (should write a record)".if_supports_color(Stdout, |t| t.yellow()),
+                );
+                println!(
+                    "     {:<28} {}",
+                    "",
+                    "then:  ccr gain             (should show Runs: 1)".if_supports_color(Stdout, |t| t.dimmed()),
                 );
             } else {
                 // Count today's records
@@ -281,7 +296,7 @@ fn check_db_writable(db_path: &Path, any_error: &mut bool) {
         Err(e) => err(
             "DB writable",
             &format!("FAILED: {}", e),
-            &format!("check permissions on {}", db_path.parent().unwrap_or(db_path).display()),
+            &format!("run: chmod 755 \"{}\"", db_path.parent().unwrap_or(db_path).display()),
             any_error,
         ),
     }
@@ -328,13 +343,18 @@ fn check_hook_binary(bin_path: &Path, any_error: &mut bool) {
         err(
             "Binary in hook",
             &format!("{} NOT FOUND", bin_path.display()),
-            "ccr init  (regenerates hook with current binary path)",
+            "run: ccr init   (rewrites hook with current binary path)",
             any_error,
         );
         println!(
             "     {:<28} {}",
             "",
-            "This happens after 'brew upgrade' changes the cellar path.".if_supports_color(Stdout, |t| t.dimmed()),
+            "Common cause: 'brew upgrade ccr' changed the cellar path.".if_supports_color(Stdout, |t| t.dimmed()),
+        );
+        println!(
+            "     {:<28} {}",
+            "",
+            "Fix takes 2 seconds: ccr init && restart Claude Code".if_supports_color(Stdout, |t| t.dimmed()),
         );
     }
 }
