@@ -154,111 +154,114 @@ run_check "Gemini hook script created at ~/.gemini/ccr-rewrite.sh" \
 run_check "Gemini hook script is executable" \
   "test -x $HOME/.gemini/ccr-rewrite.sh"
 
-run_check "Gemini hooks.json created" \
-  "test -f $HOME/.gemini/hooks.json"
+run_check "Gemini settings.json created" \
+  "test -f $HOME/.gemini/settings.json"
 
-run_check "Gemini hooks.json is valid JSON" \
-  "python3 -m json.tool $HOME/.gemini/hooks.json > /dev/null"
+run_check "Gemini settings.json is valid JSON" \
+  "python3 -m json.tool $HOME/.gemini/settings.json > /dev/null"
 
-run_check "Gemini hooks.json contains preToolUse entry" \
+run_check "Gemini settings.json contains BeforeTool entry" \
   "python3 -c \"
 import json
-with open('$HOME/.gemini/hooks.json') as f:
+with open('$HOME/.gemini/settings.json') as f:
     d = json.load(f)
 hooks = d.get('hooks', {})
-assert 'preToolUse' in hooks, 'preToolUse missing'
-\""
-
-run_check "Gemini hooks.json contains postToolUse entry" \
-  "python3 -c \"
-import json
-with open('$HOME/.gemini/hooks.json') as f:
-    d = json.load(f)
-hooks = d.get('hooks', {})
-assert 'postToolUse' in hooks, 'postToolUse missing'
+assert 'BeforeTool' in hooks, 'BeforeTool missing from settings.json'
+entry = hooks['BeforeTool'][0]
+assert entry.get('matcher') == 'run_shell_command', 'matcher should be run_shell_command'
+assert entry['hooks'][0].get('type') == 'command', 'hook type should be command'
 \""
 
 run_check "Gemini hook script always exits 0 even with bad input" \
   "echo 'bad json' | bash $HOME/.gemini/ccr-rewrite.sh; test \$? -eq 0"
 
-run_check "ccr init --agent gemini is idempotent" \
+run_check "ccr init --agent gemini is idempotent (no duplicate BeforeTool entries)" \
   "ccr init --agent gemini && python3 -c \"
 import json
-with open('$HOME/.gemini/hooks.json') as f:
+with open('$HOME/.gemini/settings.json') as f:
     d = json.load(f)
-arr = d['hooks'].get('preToolUse', [])
-ccr_count = sum(1 for e in arr if 'ccr' in str(e.get('command','')))
+before_tool = d.get('hooks', {}).get('BeforeTool', [])
+ccr_count = sum(1 for e in before_tool if any('ccr' in str(h.get('command','')) for h in e.get('hooks',[])))
 assert ccr_count == 1, f'Expected 1 ccr entry, got {ccr_count}'
 \""
 
 run_check "ccr init --uninstall --agent gemini removes hook script" \
   "ccr init --uninstall --agent gemini && test ! -f $HOME/.gemini/ccr-rewrite.sh"
 
-run_check "ccr init --uninstall --agent gemini cleans hooks.json" \
+run_check "ccr init --uninstall --agent gemini cleans settings.json" \
   "python3 -c \"
 import json
-with open('$HOME/.gemini/hooks.json') as f:
+with open('$HOME/.gemini/settings.json') as f:
     d = json.load(f)
-for event in ['preToolUse', 'postToolUse']:
-    arr = d.get('hooks', {}).get(event, [])
-    ccr_entries = [e for e in arr if 'ccr' in str(e.get('command',''))]
-    assert len(ccr_entries) == 0, f'{event} still has ccr entries'
+before_tool = d.get('hooks', {}).get('BeforeTool', [])
+ccr_entries = [e for e in before_tool if any('ccr' in str(h.get('command','')) for h in e.get('hooks',[]))]
+assert len(ccr_entries) == 0, 'BeforeTool still has ccr entries after uninstall'
 \""
 
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "5. Agent installation — VS Code Copilot"
 # ─────────────────────────────────────────────────────────────────────────────
+# Copilot is project-scoped: installs to .github/hooks/ in the current dir.
+
+cd "$REPO"
 
 run_check "ccr init --agent copilot exits 0" \
   "ccr init --agent copilot"
 
-run_check "Copilot hook script created at ~/.vscode/extensions/.ccr-hook/ccr-rewrite.sh" \
-  "test -f $HOME/.vscode/extensions/.ccr-hook/ccr-rewrite.sh"
+run_check "Copilot hook script created at .github/hooks/ccr-rewrite.sh" \
+  "test -f $REPO/.github/hooks/ccr-rewrite.sh"
 
 run_check "Copilot hook script is executable" \
-  "test -x $HOME/.vscode/extensions/.ccr-hook/ccr-rewrite.sh"
+  "test -x $REPO/.github/hooks/ccr-rewrite.sh"
 
-run_check "VS Code settings.json created" \
-  "test -f $HOME/.vscode/settings.json"
+run_check "Copilot hook config created at .github/hooks/ccr-rewrite.json" \
+  "test -f $REPO/.github/hooks/ccr-rewrite.json"
 
-run_check "VS Code settings.json is valid JSON" \
-  "python3 -m json.tool $HOME/.vscode/settings.json > /dev/null"
+run_check "Copilot hook config is valid JSON" \
+  "python3 -m json.tool $REPO/.github/hooks/ccr-rewrite.json > /dev/null"
 
-run_check "VS Code settings.json contains ccr.preToolUseScript entry" \
+run_check "Copilot hook config contains PreToolUse entry" \
   "python3 -c \"
 import json
-with open('$HOME/.vscode/settings.json') as f:
+with open('$REPO/.github/hooks/ccr-rewrite.json') as f:
     d = json.load(f)
-adv = d.get('github.copilot.advanced', {})
-assert 'ccr.preToolUseScript' in adv, 'ccr.preToolUseScript missing from github.copilot.advanced'
+hooks = d.get('hooks', {}).get('PreToolUse', [])
+assert len(hooks) > 0, 'PreToolUse missing from hook config'
+assert hooks[0].get('type') == 'command', 'hook type should be command'
 \""
+
+run_check "Copilot instructions file created at .github/copilot-instructions.md" \
+  "test -f $REPO/.github/copilot-instructions.md"
+
+run_check "Copilot instructions contain ccr-instructions-start marker" \
+  "grep -q 'ccr-instructions-start' $REPO/.github/copilot-instructions.md"
 
 run_check "Copilot hook script reads tool_input.command from JSON" \
-  "grep -q 'tool_input.command' $HOME/.vscode/extensions/.ccr-hook/ccr-rewrite.sh"
+  "grep -q 'tool_input.command' $REPO/.github/hooks/ccr-rewrite.sh"
 
-run_check "Copilot hook script exits 0 on empty/bad input" \
-  "echo '' | bash $HOME/.vscode/extensions/.ccr-hook/ccr-rewrite.sh; test \$? -eq 0"
+run_check "Copilot hook script exits 0 on empty input" \
+  "echo '' | bash $REPO/.github/hooks/ccr-rewrite.sh; test \$? -eq 0"
 
-run_check "ccr init --agent copilot is idempotent (no duplicate keys)" \
+run_check "ccr init --agent copilot is idempotent (no duplicate PreToolUse entries)" \
   "ccr init --agent copilot && python3 -c \"
 import json
-with open('$HOME/.vscode/settings.json') as f:
+with open('$REPO/.github/hooks/ccr-rewrite.json') as f:
     d = json.load(f)
-adv = d.get('github.copilot.advanced', {})
-assert list(adv.keys()).count('ccr.preToolUseScript') == 1, 'Duplicate ccr.preToolUseScript key'
+hooks = d.get('hooks', {}).get('PreToolUse', [])
+assert len(hooks) == 1, f'Expected 1 PreToolUse entry, got {len(hooks)}'
 \""
 
-run_check "ccr init --uninstall --agent copilot removes hook script" \
-  "ccr init --uninstall --agent copilot && test ! -f $HOME/.vscode/extensions/.ccr-hook/ccr-rewrite.sh"
-
-run_check "ccr init --uninstall --agent copilot cleans settings.json" \
-  "python3 -c \"
-import json
-with open('$HOME/.vscode/settings.json') as f:
-    d = json.load(f)
-adv = d.get('github.copilot.advanced', {})
-assert 'ccr.preToolUseScript' not in adv, 'ccr.preToolUseScript still present after uninstall'
+run_check "ccr init --agent copilot idempotent: instructions not duplicated" \
+  "ccr init --agent copilot && python3 -c \"
+content = open('$REPO/.github/copilot-instructions.md').read()
+assert content.count('ccr-instructions-start') == 1, 'Instructions block duplicated'
 \""
+
+run_check "ccr init --uninstall --agent copilot removes hook files" \
+  "ccr init --uninstall --agent copilot && test ! -f $REPO/.github/hooks/ccr-rewrite.sh && test ! -f $REPO/.github/hooks/ccr-rewrite.json"
+
+run_check "ccr init --uninstall --agent copilot removes instructions block" \
+  "test ! -f $REPO/.github/copilot-instructions.md || ! grep -q 'ccr-instructions-start' $REPO/.github/copilot-instructions.md"
 
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "6. ccr run — basic command compression"

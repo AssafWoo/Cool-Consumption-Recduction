@@ -1,17 +1,20 @@
 //! Gemini CLI agent installer.
 //!
-//! Gemini CLI reads hooks from `~/.gemini/hooks.json`.
+//! Gemini CLI reads hooks from `~/.gemini/settings.json`.
 //!
-//! Input format:
-//!   `{"tool_name": "run_shell_command", "tool_input": {"command": "..."}}`
+//! Hook registration format:
+//!   ```json
+//!   { "hooks": { "BeforeTool": [
+//!     { "matcher": "run_shell_command",
+//!       "hooks": [{ "type": "command", "command": "<script_path>" }] }
+//!   ]}}
+//!   ```
 //!
-//! Output (rewrite):
-//!   `{"decision": "allow", "hookSpecificOutput": {"tool_input": {"command": "rewritten"}}}`
+//! Hook input:  `{"tool_name": "run_shell_command", "tool_input": {"command": "..."}}`
+//! Hook output (rewrite): `{"decision": "allow", "hookSpecificOutput": {"tool_input": {"command": "rewritten"}}}`
+//! Hook output (no-op):   `{"decision": "allow"}`
 //!
-//! Output (no-op):
-//!   `{"decision": "allow"}`
-//!
-//! Exit 0 on ALL error paths — Gemini CLI does not tolerate non-zero exit from hooks.
+//! Exit 0 on ALL error paths — Gemini CLI terminates on non-zero hook exit.
 
 use super::AgentInstaller;
 use std::path::PathBuf;
@@ -22,8 +25,8 @@ fn gemini_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".gemini"))
 }
 
-fn hooks_json_path() -> Option<PathBuf> {
-    Some(gemini_dir()?.join("hooks.json"))
+fn settings_path() -> Option<PathBuf> {
+    Some(gemini_dir()?.join("settings.json"))
 }
 
 impl AgentInstaller for GeminiInstaller {
@@ -49,55 +52,70 @@ impl AgentInstaller for GeminiInstaller {
             std::fs::set_permissions(&script_path, perms)?;
         }
 
-        // Update ~/.gemini/hooks.json
-        let Some(hooks_path) = hooks_json_path() else {
-            anyhow::bail!("Cannot determine Gemini hooks path");
+        // Update ~/.gemini/settings.json
+        let Some(settings_path) = settings_path() else {
+            anyhow::bail!("Cannot determine Gemini settings path");
         };
 
-        let mut root: serde_json::Value = if hooks_path.exists() {
-            let content = std::fs::read_to_string(&hooks_path)?;
-            serde_json::from_str(&content).unwrap_or(serde_json::json!({"version": 1}))
+        let mut root: serde_json::Value = if settings_path.exists() {
+            let content = std::fs::read_to_string(&settings_path)?;
+            serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
         } else {
-            serde_json::json!({"version": 1})
+            serde_json::json!({})
         };
 
-        // Strip existing CCR entries
-        for event in &["preToolUse", "postToolUse"] {
-            if let Some(arr) = root
-                .get_mut("hooks")
-                .and_then(|h| h.get_mut(*event))
-                .and_then(|e| e.as_array_mut())
-            {
-                arr.retain(|e| !e["command"].as_str().unwrap_or("").contains("ccr"));
-            }
+        // Remove existing CCR entries from BeforeTool
+        if let Some(arr) = root
+            .get_mut("hooks")
+            .and_then(|h| h.get_mut("BeforeTool"))
+            .and_then(|e| e.as_array_mut())
+        {
+            arr.retain(|entry| {
+                !entry["hooks"]
+                    .as_array()
+                    .and_then(|hooks| hooks.first())
+                    .and_then(|h| h["command"].as_str())
+                    .unwrap_or("")
+                    .contains("ccr")
+            });
         }
 
-        // PreToolUse rewrite hook
-        insert_hook_entry(
-            &mut root,
-            "preToolUse",
-            serde_json::json!({
-                "command": script_path.to_string_lossy(),
-                "matcher": "run_shell_command"
-            }),
-        );
+        // Insert BeforeTool rewrite hook entry
+        let script_str = script_path.to_string_lossy().to_string();
+        let entry = serde_json::json!({
+            "matcher": "run_shell_command",
+            "hooks": [{ "type": "command", "command": script_str }]
+        });
 
-        // PostToolUse compressor
-        let hook_cmd = format!(
-            "CCR_SESSION_ID=$PPID CCR_AGENT=gemini {} hook",
-            ccr_bin
-        );
-        insert_hook_entry(
-            &mut root,
-            "postToolUse",
-            serde_json::json!({"command": hook_cmd, "matcher": "run_shell_command"}),
-        );
+        let root_obj = root.as_object_mut().unwrap();
+        let hooks = root_obj
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .unwrap();
+        let before_tool = hooks
+            .entry("BeforeTool")
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .unwrap();
 
-        std::fs::write(&hooks_path, serde_json::to_string_pretty(&root)?)?;
+        let already = before_tool.iter().any(|e| {
+            e["hooks"]
+                .as_array()
+                .and_then(|h| h.first())
+                .and_then(|h| h["command"].as_str())
+                .unwrap_or("")
+                == script_path.to_string_lossy()
+        });
+        if !already {
+            before_tool.push(entry);
+        }
+
+        std::fs::write(&settings_path, serde_json::to_string_pretty(&root)?)?;
 
         println!("CCR hooks installed (Gemini CLI):");
-        println!("  Script:  {}", script_path.display());
-        println!("  Config:  {}", hooks_path.display());
+        println!("  Script:   {}", script_path.display());
+        println!("  Settings: {}", settings_path.display());
 
         Ok(())
     }
@@ -113,24 +131,31 @@ impl AgentInstaller for GeminiInstaller {
             println!("Removed {}", script_path.display());
         }
 
-        let Some(hooks_path) = hooks_json_path() else {
+        let Some(settings_path) = settings_path() else {
             return Ok(());
         };
-        if hooks_path.exists() {
-            let content = std::fs::read_to_string(&hooks_path)?;
+        if settings_path.exists() {
+            let content = std::fs::read_to_string(&settings_path)?;
             let mut root: serde_json::Value =
                 serde_json::from_str(&content).unwrap_or(serde_json::json!({}));
-            for event in &["preToolUse", "postToolUse"] {
-                if let Some(arr) = root
-                    .get_mut("hooks")
-                    .and_then(|h| h.get_mut(*event))
-                    .and_then(|e| e.as_array_mut())
-                {
-                    arr.retain(|e| !e["command"].as_str().unwrap_or("").contains("ccr"));
-                }
+
+            if let Some(arr) = root
+                .get_mut("hooks")
+                .and_then(|h| h.get_mut("BeforeTool"))
+                .and_then(|e| e.as_array_mut())
+            {
+                arr.retain(|entry| {
+                    !entry["hooks"]
+                        .as_array()
+                        .and_then(|hooks| hooks.first())
+                        .and_then(|h| h["command"].as_str())
+                        .unwrap_or("")
+                        .contains("ccr")
+                });
             }
-            std::fs::write(&hooks_path, serde_json::to_string_pretty(&root)?)?;
-            println!("Removed CCR entries from {}", hooks_path.display());
+
+            std::fs::write(&settings_path, serde_json::to_string_pretty(&root)?)?;
+            println!("Removed CCR entries from {}", settings_path.display());
         }
 
         Ok(())
@@ -142,8 +167,8 @@ impl AgentInstaller for GeminiInstaller {
 fn generate_gemini_script(ccr_bin: &str) -> String {
     format!(
         r#"#!/usr/bin/env bash
-# CCR Gemini CLI PreToolUse hook
-# Rewrites run_shell_command tool invocations for token savings.
+# CCR Gemini CLI BeforeTool hook
+# Rewrites run_shell_command invocations for token savings.
 # ALWAYS exits 0 — Gemini CLI terminates on non-zero hook exit.
 INPUT=$(cat)
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
@@ -168,29 +193,4 @@ jq -n --arg cmd "$REWRITTEN" '{{
 "#,
         ccr_bin = ccr_bin
     )
-}
-
-fn insert_hook_entry(root: &mut serde_json::Value, event: &str, entry: serde_json::Value) {
-    let root_obj = match root.as_object_mut() {
-        Some(o) => o,
-        None => return,
-    };
-    root_obj.entry("version").or_insert(serde_json::json!(1));
-    let hooks = root_obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .expect("hooks must be an object");
-    let arr = hooks
-        .entry(event)
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .expect("event must be an array");
-    let cmd = entry["command"].as_str().unwrap_or("").to_string();
-    let already = arr
-        .iter()
-        .any(|e| e["command"].as_str().unwrap_or("") == cmd);
-    if !already {
-        arr.push(entry);
-    }
 }
