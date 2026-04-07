@@ -2,23 +2,68 @@ use super::Handler;
 
 pub struct GitHandler;
 
+/// Find the git subcommand, skipping any global options that appear before it.
+///
+/// Examples:
+/// - `["git", "status"]`            → "status"
+/// - `["git", "-C", "/path", "log"]`→ "log"
+/// - `["git", "--no-pager", "diff"]`→ "diff"
+/// - `["git", "-c", "k=v", "push"]` → "push"
+fn git_subcmd(args: &[String]) -> &str {
+    let mut i = 1usize; // skip argv[0] = "git"
+    while i < args.len() {
+        let a = args[i].as_str();
+        // Options that consume the next argument as their value
+        if matches!(a, "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--super-prefix") {
+            i += 2;
+            continue;
+        }
+        // Options that embed their value or are standalone boolean flags
+        if a.starts_with("--git-dir=")
+            || a.starts_with("--work-tree=")
+            || a.starts_with("--namespace=")
+            || a.starts_with("-c=")
+            || matches!(
+                a,
+                "--no-pager" | "--paginate" | "-p"
+                | "--bare" | "--no-replace-objects"
+                | "--literal-pathspecs" | "--no-optional-locks"
+                | "--version" | "--help"
+            )
+        {
+            i += 1;
+            continue;
+        }
+        // First non-option token is the subcommand
+        if !a.starts_with('-') {
+            return a;
+        }
+        // Unknown option — skip
+        i += 1;
+    }
+    ""
+}
+
 const PUSH_PULL_ERROR_TERMS: &[&str] = &["error:", "rejected", "conflict", "denied", "fatal:"];
 
 impl Handler for GitHandler {
     fn rewrite_args(&self, args: &[String]) -> Vec<String> {
-        let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        let subcmd = git_subcmd(args);
         match subcmd {
             "log" => {
                 if !args.iter().any(|a| a == "--oneline") {
                     let mut out = args.to_vec();
-                    out.insert(2, "--oneline".to_string());
+                    // Insert after the last global-option/value pair, just before subcmd
+                    let subcmd_pos = args.iter().position(|a| a.as_str() == subcmd).unwrap_or(1);
+                    out.insert(subcmd_pos + 1, "--oneline".to_string());
                     return out;
                 }
             }
             "status" => {
                 if !args.iter().any(|a| a == "--porcelain" || a == "--short" || a == "-s") {
                     let mut out = args.to_vec();
-                    out.insert(2, "--porcelain".to_string());
+                    let subcmd_pos = args.iter().position(|a| a.as_str() == subcmd).unwrap_or(1);
+                    out.insert(subcmd_pos + 1, "--porcelain".to_string());
                     return out;
                 }
             }
@@ -28,7 +73,7 @@ impl Handler for GitHandler {
     }
 
     fn filter(&self, output: &str, args: &[String]) -> String {
-        let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        let subcmd = git_subcmd(args);
         match subcmd {
             "status" => filter_status(output),
             "log" => filter_log(output),
@@ -471,6 +516,58 @@ mod tests {
         let args: Vec<String> = vec!["git".into(), "status".into(), "--porcelain".into()];
         let rewritten = handler.rewrite_args(&args);
         assert_eq!(rewritten.iter().filter(|a| *a == "--porcelain").count(), 1);
+    }
+
+    #[test]
+    fn test_rewrite_with_dash_c_global_option() {
+        let handler = GitHandler;
+        let args: Vec<String> = vec!["git".into(), "-C".into(), "/some/repo".into(), "status".into()];
+        let rewritten = handler.rewrite_args(&args);
+        assert!(rewritten.contains(&"--porcelain".to_string()),
+            "should inject --porcelain even with -C global option: {:?}", rewritten);
+    }
+
+    #[test]
+    fn test_rewrite_with_no_pager_global_option() {
+        let handler = GitHandler;
+        let args: Vec<String> = vec!["git".into(), "--no-pager".into(), "log".into()];
+        let rewritten = handler.rewrite_args(&args);
+        assert!(rewritten.contains(&"--oneline".to_string()),
+            "should inject --oneline even with --no-pager: {:?}", rewritten);
+    }
+
+    #[test]
+    fn test_filter_with_dash_c_global_option() {
+        let handler = GitHandler;
+        let args: Vec<String> = vec!["git".into(), "-C".into(), "/path".into(), "push".into()];
+        // push filter should not passthrough raw (it should use filter_push_pull)
+        let output = "Everything up-to-date\n";
+        let result = handler.filter(output, &args);
+        assert_eq!(result, "ok (up to date)", "filter should route correctly past -C: {}", result);
+    }
+
+    #[test]
+    fn test_git_subcmd_basic() {
+        let args: Vec<String> = vec!["git".into(), "status".into()];
+        assert_eq!(git_subcmd(&args), "status");
+    }
+
+    #[test]
+    fn test_git_subcmd_with_c_flag() {
+        let args: Vec<String> = vec!["git".into(), "-C".into(), "/repo".into(), "log".into()];
+        assert_eq!(git_subcmd(&args), "log");
+    }
+
+    #[test]
+    fn test_git_subcmd_with_c_and_config() {
+        let args: Vec<String> = vec!["git".into(), "-C".into(), "/repo".into(), "-c".into(), "k=v".into(), "diff".into()];
+        assert_eq!(git_subcmd(&args), "diff");
+    }
+
+    #[test]
+    fn test_git_subcmd_empty() {
+        let args: Vec<String> = vec!["git".into()];
+        assert_eq!(git_subcmd(&args), "");
     }
 
     #[test]

@@ -13,7 +13,7 @@ fn session_with_prior(cmd: &str, content: &str, is_state: bool) -> SessionState 
     let mut s = SessionState::default();
     let emb = embed(content);
     let tokens = content.len() / 4;
-    s.record(cmd, emb, tokens, content, is_state);
+    s.record(cmd, emb, tokens, content, is_state, None);
     s
 }
 
@@ -58,7 +58,7 @@ fn state_command_stores_full_content_beyond_4000_chars() {
 
     let mut s = SessionState::default();
     let emb = embed(&long_content[..200]); // embed a short proxy
-    s.record("git", emb, long_content.len() / 4, &long_content, true);
+    s.record("git", emb, long_content.len() / 4, &long_content, true, None);
 
     let entry = &s.entries[0];
     assert!(
@@ -79,7 +79,7 @@ fn non_state_command_caps_preview_at_4000() {
 
     let mut s = SessionState::default();
     let emb = embed("cargo build");
-    s.record("cargo", emb, long_content.len() / 4, &long_content, false);
+    s.record("cargo", emb, long_content.len() / 4, &long_content, false, None);
 
     let entry = &s.entries[0];
     assert!(

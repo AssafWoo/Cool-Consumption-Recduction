@@ -4,6 +4,23 @@ use super::Handler;
 
 pub struct CargoHandler;
 
+/// Find the cargo subcommand, skipping any toolchain override token (`+nightly`, `+stable`, etc.)
+/// that cargo allows between `cargo` and the subcommand.
+///
+/// Examples:
+/// - `["cargo", "build"]`           → "build"
+/// - `["cargo", "+nightly", "build"]`→ "build"
+/// - `["cargo", "+1.70.0", "clippy"]`→ "clippy"
+fn cargo_subcmd(args: &[String]) -> &str {
+    for a in args.iter().skip(1) {
+        if a.starts_with('+') {
+            continue; // toolchain override: +nightly, +stable, +1.70.0, etc.
+        }
+        return a.as_str();
+    }
+    ""
+}
+
 fn re_clippy_rule() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r"\[(\w+)\]").expect("cargo clippy rule regex"))
@@ -11,7 +28,7 @@ fn re_clippy_rule() -> &'static regex::Regex {
 
 impl Handler for CargoHandler {
     fn rewrite_args(&self, args: &[String]) -> Vec<String> {
-        let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        let subcmd = cargo_subcmd(args);
         match subcmd {
             "build" | "check" | "clippy" => {
                 // Inject --message-format json unless already present.
@@ -42,7 +59,7 @@ impl Handler for CargoHandler {
     }
 
     fn filter(&self, output: &str, args: &[String]) -> String {
-        let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        let subcmd = cargo_subcmd(args);
         match subcmd {
             "build" | "check" | "clippy" => filter_build(output),
             "test" | "nextest" => filter_test(output),
@@ -348,6 +365,58 @@ mod tests {
         let result = handler.rewrite_args(&args);
         assert!(!result.contains(&"--message-format".to_string()),
             "cargo test should not get --message-format injected");
+    }
+
+    // ── toolchain override (+nightly) tests ───────────────────────────────────
+
+    #[test]
+    fn toolchain_override_build_injected() {
+        let handler = CargoHandler;
+        let args: Vec<String> = vec!["cargo", "+nightly", "build"]
+            .into_iter().map(String::from).collect();
+        let result = handler.rewrite_args(&args);
+        assert!(result.contains(&"--message-format".to_string()),
+            "cargo +nightly build should get --message-format injected: {:?}", result);
+        assert!(result.contains(&"+nightly".to_string()),
+            "toolchain token should be preserved: {:?}", result);
+    }
+
+    #[test]
+    fn toolchain_override_clippy_injected() {
+        let handler = CargoHandler;
+        let args: Vec<String> = vec!["cargo", "+stable", "clippy"]
+            .into_iter().map(String::from).collect();
+        let result = handler.rewrite_args(&args);
+        assert!(result.contains(&"--message-format".to_string()),
+            "cargo +stable clippy should get --message-format injected: {:?}", result);
+    }
+
+    #[test]
+    fn toolchain_override_test_not_injected() {
+        let handler = CargoHandler;
+        let args: Vec<String> = vec!["cargo", "+nightly", "test"]
+            .into_iter().map(String::from).collect();
+        let result = handler.rewrite_args(&args);
+        assert!(!result.contains(&"--message-format".to_string()),
+            "cargo +nightly test should not get --message-format: {:?}", result);
+    }
+
+    #[test]
+    fn cargo_subcmd_basic() {
+        let args: Vec<String> = vec!["cargo".into(), "build".into()];
+        assert_eq!(cargo_subcmd(&args), "build");
+    }
+
+    #[test]
+    fn cargo_subcmd_with_toolchain() {
+        let args: Vec<String> = vec!["cargo".into(), "+nightly".into(), "check".into()];
+        assert_eq!(cargo_subcmd(&args), "check");
+    }
+
+    #[test]
+    fn cargo_subcmd_empty() {
+        let args: Vec<String> = vec!["cargo".into()];
+        assert_eq!(cargo_subcmd(&args), "");
     }
 
     #[test]

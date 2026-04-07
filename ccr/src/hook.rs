@@ -139,9 +139,11 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
         Err(_) => return Ok(None),
     };
 
-    // IX: use Claude's last assistant message as the BERT query when available.
+    // IX: use the last 3 assistant messages as the BERT query when available.
+    // Multi-turn accumulation weights by recency [200, 150, 100 chars] so that
+    // repeated themes (e.g. "auth", "token refresh") dominate the query embedding.
     // Falls back to the command string if no session file is found.
-    let query = crate::intent::extract_intent().or_else(|| {
+    let query = crate::intent::extract_intent_multi(3).or_else(|| {
         hook_input
             .tool_input
             .get("command")
@@ -192,7 +194,15 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
 
     let historical_centroid = session.command_centroid(&cmd_key).cloned();
 
-    let pressure = session.context_pressure();
+    // Adaptive pressure: if the same command has been producing near-identical output
+    // (high centroid_delta similarity), it's stale context — compress it more.
+    // Similarity < 0.85 → no modifier (content is novel).
+    // Similarity 0.85→1.0 → linearly maps to modifier 0.0→0.32 (capped).
+    let stability_pressure = session
+        .last_centroid_delta(&cmd_key)
+        .map(stability_to_pressure)
+        .unwrap_or(0.0);
+    let pressure = (session.context_pressure() + stability_pressure).min(1.0);
     ccr_core::zoom::enable();
 
     // NL: apply pre-filter to remove lines promoted as permanent noise.
@@ -214,7 +224,7 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
     };
 
     let pipeline = ccr_core::pipeline::Pipeline::new(config.with_pressure(pressure));
-    let result = match pipeline.process(
+    let mut result = match pipeline.process(
         &filtered_text,
         command_hint.as_deref(),
         query.as_deref(),
@@ -233,6 +243,8 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
         store.save(key);
     }
 
+    // Enrich zoom block labels with content-derived categories before persisting.
+    result.output = enrich_zoom_labels(&result.output, &result.zoom_blocks);
     let _ = crate::zoom_store::save_blocks(&sid, result.zoom_blocks);
 
     // ── Session-aware passes ──────────────────────────────────────────────────
@@ -261,40 +273,54 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
 
     let after_dedup = apply_sentence_dedup(&output_after_delta, &cmd_key, &session);
 
+    // Determine is_state early so cross-command dedup can respect the guard.
+    let is_state = {
+        if let Ok(cfg) = crate::config_loader::load_config() {
+            cfg.global.state_commands.iter().any(|s| {
+                command_hint.as_deref() == Some(s.as_str())
+            })
+        } else {
+            false
+        }
+    };
+
+    let after_xdedup = cross_command_dedup(&after_dedup, &cmd_key, &session, &sid, is_state);
+
+    // Save any new zoom blocks registered during cross-command dedup.
+    let xdedup_blocks = ccr_core::zoom::drain();
+    if !xdedup_blocks.is_empty() {
+        let _ = crate::zoom_store::save_blocks(&sid, xdedup_blocks);
+    }
+
     let compression_factor = session.compression_factor();
     let centroid_for_c2 = session.command_centroid(&cmd_key).cloned();
     let mut final_output = if compression_factor < 0.90 && pipeline_line_count >= BERT_MIN_LINES {
-        let line_count = after_dedup.lines().count();
+        let line_count = after_xdedup.lines().count();
         let reduced_budget = ((line_count as f32 * compression_factor) as usize).max(10);
         if let Some(ref centroid) = centroid_for_c2 {
-            ccr_core::summarizer::summarize_against_centroid(&after_dedup, reduced_budget, centroid)
+            ccr_core::summarizer::summarize_against_centroid(&after_xdedup, reduced_budget, centroid)
                 .output
         } else {
-            ccr_core::summarizer::summarize(&after_dedup, reduced_budget).output
+            ccr_core::summarizer::summarize(&after_xdedup, reduced_budget).output
         }
     } else {
-        after_dedup
+        after_xdedup
     };
 
     if pipeline_line_count >= BERT_MIN_LINES {
         if let Ok(mut embeddings) = ccr_core::summarizer::embed_batch(&[final_output.as_str()]) {
             if let Some(emb) = embeddings.pop() {
                 let tokens = ccr_core::tokens::count_tokens(&final_output);
-                if let Ok(line_centroid) = ccr_core::summarizer::compute_output_centroid(&final_output) {
-                    session.update_command_centroid(&cmd_key, line_centroid);
-                } else {
-                    session.update_command_centroid(&cmd_key, emb.clone());
-                }
-                let is_state = {
-                    if let Ok(cfg) = crate::config_loader::load_config() {
-                        cfg.global.state_commands.iter().any(|s| {
-                            command_hint.as_deref() == Some(s.as_str())
-                        })
-                    } else {
-                        false
-                    }
-                };
-                session.record(&cmd_key, emb, tokens, &final_output, is_state);
+                // Compute centroid_delta: cosine similarity of new centroid vs historical.
+                // Stored on the entry so the NEXT invocation can derive stability pressure.
+                let new_centroid = ccr_core::summarizer::compute_output_centroid(&final_output)
+                    .ok()
+                    .unwrap_or_else(|| emb.clone());
+                let centroid_delta = historical_centroid
+                    .as_ref()
+                    .map(|hist| crate::handlers::util::cosine_similarity(hist, &new_centroid));
+                session.update_command_centroid(&cmd_key, new_centroid);
+                session.record(&cmd_key, emb, tokens, &final_output, is_state, centroid_delta);
                 session.save(&sid);
             }
         }
@@ -435,7 +461,7 @@ fn process_read(hook_input: HookInput) -> Result<Option<String>> {
                     hit.turn, age, hit.tokens_saved
                 )
             } else {
-                session.record(&file_path, emb, tokens, &result.output, false);
+                session.record(&file_path, emb, tokens, &result.output, false, None);
                 session.save(&sid);
                 result.output
             }
@@ -553,6 +579,7 @@ fn process_glob(hook_input: HookInput) -> Result<Option<String>> {
                 embedding: emb,
                 content_preview: preview,
                 state_content: None,
+                centroid_delta: None,
             });
             session.total_turns += 1;
             session.total_tokens += tokens;
@@ -675,6 +702,267 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ── Adaptive pressure helper (Feature 2) ─────────────────────────────────────
+
+/// Convert centroid similarity to an additive pressure modifier.
+/// Similarity < 0.85 → 0 (novel content, no extra pressure).
+/// Similarity 0.85→1.0 → linearly maps to 0.0→0.32.
+fn stability_to_pressure(sim: f32) -> f32 {
+    if sim < 0.85 {
+        return 0.0;
+    }
+    ((sim - 0.85) / 0.15 * 0.8).min(0.8) * 0.4
+}
+
+// ── Zoom label enrichment (Feature 3) ────────────────────────────────────────
+
+/// Infer a human-readable category for a collapsed block from its lines.
+fn categorize_block(lines: &[String]) -> &'static str {
+    if lines.is_empty() {
+        return "filtered output";
+    }
+    // Build/download progress: all lines start with well-known prefixes
+    if lines.iter().all(|l| {
+        let l = l.trim_start();
+        l.starts_with("Compiling")
+            || l.starts_with("Checking")
+            || l.starts_with("Download")
+            || l.starts_with("Fetching")
+            || l.starts_with("Updating")
+    }) {
+        return "build/download progress";
+    }
+
+    let joined = lines.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n");
+    let low = joined.to_lowercase();
+
+    if low.contains("error:") || low.contains("error[") {
+        return "error details";
+    }
+    if low.contains("panicked") || low.contains("stack backtrace") {
+        return "stack trace";
+    }
+    if (low.contains("passed") || low.contains(" ok")) && !low.contains("failed") && !low.contains("error:") {
+        if low.contains("test") {
+            return "passing tests";
+        }
+    }
+    if low.contains("warning:") {
+        return "compiler warnings";
+    }
+    if low.contains("note:") {
+        return "compiler notes";
+    }
+    if lines.iter().all(|l| l.starts_with("  ") || l.starts_with('\t')) {
+        return "indented detail";
+    }
+    "filtered output"
+}
+
+/// Replace generic zoom markers like `[20 matching lines collapsed — ccr expand ZI_1]`
+/// with descriptive ones like `[20 lines: compiler warnings — ccr expand ZI_1]`.
+fn enrich_zoom_labels(output: &str, zoom_blocks: &[ccr_core::zoom::ZoomBlock]) -> String {
+    let mut result = output.to_string();
+    for block in zoom_blocks {
+        let label = categorize_block(&block.lines);
+        let expand_tag = format!("ccr expand {}", block.id);
+        result = result
+            .lines()
+            .map(|line| {
+                if line.contains(&expand_tag) {
+                    format!("[{} lines: {} — {}]", block.lines.len(), label, expand_tag)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    result
+}
+
+// ── Cross-command semantic deduplication (Feature 4) ─────────────────────────
+
+/// Split `text` into paragraph-sized segments (groups of non-blank lines separated
+/// by blank lines). Only segments with at least `min_lines` lines are returned.
+fn segment_output(text: &str, min_lines: usize) -> Vec<String> {
+    let mut segments: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if current.len() >= min_lines {
+                segments.push(current.join("\n"));
+            }
+            current.clear();
+        } else {
+            current.push(line);
+        }
+    }
+    if current.len() >= min_lines {
+        segments.push(current.join("\n"));
+    }
+    segments
+}
+
+/// Rebuild `original` output, replacing suppressed segments with zoom block markers.
+/// `suppress[i] = Some(turn)` means segment `i` was seen in `turn` of a different command.
+fn rebuild_with_suppressions(
+    original: &str,
+    segments: &[String],
+    suppress: &[Option<usize>],
+) -> String {
+    // Build a lookup from segment text → referenced turn
+    let suppressed: std::collections::HashMap<&str, usize> = segments
+        .iter()
+        .zip(suppress.iter())
+        .filter_map(|(seg, s)| s.map(|turn| (seg.as_str(), turn)))
+        .collect();
+
+    if suppressed.is_empty() {
+        return original.to_string();
+    }
+
+    let mut output_lines: Vec<String> = Vec::new();
+    let mut current_para: Vec<&str> = Vec::new();
+    // Chain a sentinel blank line so the last paragraph is always flushed.
+    let lines_with_sentinel: Vec<&str> = original.lines().chain(std::iter::once("")).collect();
+
+    for line in lines_with_sentinel {
+        if line.trim().is_empty() {
+            if !current_para.is_empty() {
+                let para_text = current_para.join("\n");
+                if let Some(&turn) = suppressed.get(para_text.as_str()) {
+                    let n = current_para.len();
+                    // Register as a zoom block so `ccr expand ZI_N` works.
+                    let zi_id = ccr_core::zoom::register(
+                        current_para.iter().map(|l| l.to_string()).collect(),
+                    );
+                    output_lines.push(format!(
+                        "[{} lines: already shown (turn {}) — ccr expand {}]",
+                        n, turn, zi_id
+                    ));
+                } else {
+                    output_lines.extend(current_para.iter().map(|l| l.to_string()));
+                    output_lines.push(String::new());
+                }
+                current_para.clear();
+            }
+        } else {
+            current_para.push(line);
+        }
+    }
+
+    // Strip trailing blank sentinel if present
+    if output_lines.last().map_or(false, |l| l.is_empty()) {
+        output_lines.pop();
+    }
+
+    output_lines.join("\n")
+}
+
+/// Suppress segments of the current output that are semantically similar
+/// (cosine ≥ 0.85) to segments from the last 5 entries of *different* commands.
+/// Replaces suppressed segments with zoom block back-reference markers.
+///
+/// Guards: only runs when output ≥ 20 lines, skips state commands, and never
+/// suppresses more than 40% of total output lines.
+fn cross_command_dedup(
+    output: &str,
+    cmd_key: &str,
+    session: &crate::session::SessionState,
+    sid: &str,
+    is_state: bool,
+) -> String {
+    const MIN_LINES: usize = 20;
+    const MIN_SEGMENT_LINES: usize = 5;
+    const SIMILARITY_THRESHOLD: f32 = 0.85;
+    const MAX_SUPPRESS_RATIO: f32 = 0.40;
+
+    if is_state {
+        return output.to_string();
+    }
+    let total_lines = output.lines().count();
+    if total_lines < MIN_LINES {
+        return output.to_string();
+    }
+
+    let current_segments = segment_output(output, MIN_SEGMENT_LINES);
+    if current_segments.is_empty() {
+        return output.to_string();
+    }
+
+    // Gather up to 5 entries from different commands (most recent first)
+    let prior_entries: Vec<&crate::session::SessionEntry> = session
+        .entries
+        .iter()
+        .rev()
+        .filter(|e| e.cmd != cmd_key)
+        .take(5)
+        .collect();
+    if prior_entries.is_empty() {
+        return output.to_string();
+    }
+
+    // Build (turn, segment_text) pairs from prior entries
+    let prior_segments: Vec<(usize, String)> = prior_entries
+        .iter()
+        .flat_map(|e| {
+            let content = e.state_content.as_deref().unwrap_or(&e.content_preview);
+            segment_output(content, MIN_SEGMENT_LINES)
+                .into_iter()
+                .map(|s| (e.turn, s))
+        })
+        .collect();
+
+    if prior_segments.is_empty() {
+        return output.to_string();
+    }
+
+    // Batch-embed all segments in one call
+    let all_texts: Vec<&str> = current_segments
+        .iter()
+        .map(|s| s.as_str())
+        .chain(prior_segments.iter().map(|(_, s)| s.as_str()))
+        .collect();
+
+    let embeddings = match ccr_core::summarizer::embed_batch(&all_texts) {
+        Ok(e) => e,
+        Err(_) => return output.to_string(),
+    };
+
+    let n_cur = current_segments.len();
+    let cur_embs = &embeddings[..n_cur];
+    let prior_embs = &embeddings[n_cur..];
+
+    // For each current segment, find the most similar prior segment
+    let mut suppress: Vec<Option<usize>> = vec![None; n_cur];
+    let mut suppressed_lines = 0usize;
+
+    for (i, cur_emb) in cur_embs.iter().enumerate() {
+        for (j, prior_emb) in prior_embs.iter().enumerate() {
+            let sim = crate::handlers::util::cosine_similarity(cur_emb, prior_emb);
+            if sim >= SIMILARITY_THRESHOLD {
+                suppress[i] = Some(prior_segments[j].0);
+                suppressed_lines += current_segments[i].lines().count();
+                break;
+            }
+        }
+    }
+
+    // Guard: don't suppress more than MAX_SUPPRESS_RATIO of all lines
+    if suppressed_lines as f32 / total_lines as f32 > MAX_SUPPRESS_RATIO {
+        return output.to_string();
+    }
+
+    if suppress.iter().all(|s| s.is_none()) {
+        return output.to_string();
+    }
+
+    let _ = sid; // session_id reserved for future use (e.g. incremental zoom block saving)
+    rebuild_with_suppressions(output, &current_segments, &suppress)
 }
 
 #[cfg(test)]

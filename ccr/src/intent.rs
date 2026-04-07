@@ -1,19 +1,30 @@
 //! IX — Intent Extraction.
 //!
-//! Reads the most recent assistant message from Claude Code's live JSONL session
-//! file and returns it as a BERT query string. This replaces the shallow command
+//! Reads the most recent assistant message(s) from Claude Code's live JSONL session
+//! file and returns them as a BERT query string. This replaces the shallow command
 //! name (e.g. "cargo") with Claude's natural-language intent (e.g. "trace where
 //! the memory leak occurs in the connection pool"), making BERT importance scoring
 //! dramatically more relevant.
+//!
+//! `extract_intent_multi(n)` collects up to n recent assistant messages, weighted
+//! by recency via char budgets [200, 150, 100], and joins them with " | ".
+//! Repeated themes (e.g. "auth", "token refresh") naturally dominate the query
+//! embedding without explicit weighting.
 //!
 //! Every failure returns `None` silently — the caller falls back to the command
 //! string. Zero panics, zero stderr output.
 
 use std::io::{Read, Seek, SeekFrom};
 
-/// Extract the last assistant text from the current Claude Code session's JSONL file.
-/// Returns `None` on any error (file not found, parse failure, empty content).
-pub fn extract_intent() -> Option<String> {
+/// Extract up to `n` recent assistant messages from the current Claude Code session,
+/// concatenated with " | " and weighted by recency (newest first).
+///
+/// Char budgets per message position: [200, 150, 100]. Positions beyond index 2
+/// get 100 chars each. Returns `None` on any error or when no messages are found.
+pub fn extract_intent_multi(n: usize) -> Option<String> {
+    if n == 0 {
+        return None;
+    }
     let projects_dir = dirs::home_dir()?.join(".claude").join("projects");
     let project_dir = crate::util::project_dir_from_cwd()?;
     let session_dir = projects_dir.join(&project_dir);
@@ -31,7 +42,7 @@ pub fn extract_intent() -> Option<String> {
         .max_by_key(|(t, _)| *t)?
         .1;
 
-    // Scan backwards in 256 KB chunks to find the last assistant message.
+    // Scan backwards in 256 KB chunks to find recent assistant messages.
     // Assistant messages can be preceded by very large tool-result lines (file reads,
     // long command output), so a fixed small tail would miss them in large sessions.
     let mut file = std::fs::File::open(&jsonl_path).ok()?;
@@ -39,11 +50,12 @@ pub fn extract_intent() -> Option<String> {
 
     const CHUNK: u64 = 262_144; // 256 KB per pass
     const MAX_SCAN: u64 = 4 * CHUNK; // give up after 1 MB
+    const BUDGETS: [usize; 3] = [200, 150, 100]; // char limits by recency
 
-    let mut last_text: Option<String> = None;
+    let mut collected: Vec<String> = Vec::with_capacity(n);
     let mut scanned: u64 = 0;
 
-    while scanned < MAX_SCAN && last_text.is_none() {
+    while scanned < MAX_SCAN && collected.len() < n {
         let window = CHUNK.min(file_len.saturating_sub(scanned));
         if window == 0 {
             break;
@@ -59,6 +71,9 @@ pub fn extract_intent() -> Option<String> {
         lines.reverse();
 
         for line in lines {
+            if collected.len() >= n {
+                break;
+            }
             if !line.contains("\"type\":\"assistant\"") {
                 continue;
             }
@@ -80,34 +95,42 @@ pub fn extract_intent() -> Option<String> {
                     if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                         let trimmed = t.trim();
                         if !trimmed.is_empty() {
-                            last_text = Some(trimmed.to_string());
+                            let budget = BUDGETS.get(collected.len()).copied().unwrap_or(100);
+                            collected.push(clean_intent_with_limit(trimmed, budget));
                             break;
                         }
                     }
                 }
             }
-            if last_text.is_some() {
-                break;
-            }
         }
         scanned += window;
     }
 
-    let text = last_text?;
-    Some(clean_intent(&text))
+    if collected.is_empty() {
+        return None;
+    }
+    Some(collected.join(" | "))
 }
 
-/// Strip markdown and return the first sentence up to 256 chars.
+/// Extract the last assistant text from the current Claude Code session's JSONL file.
+/// Returns `None` on any error (file not found, parse failure, empty content).
+///
+/// Thin wrapper around `extract_intent_multi(1)`.
+pub fn extract_intent() -> Option<String> {
+    extract_intent_multi(1)
+}
+
+/// Strip markdown and return the first sentence up to `char_limit` chars.
 /// Truncates at the first sentence boundary (`.`, `?`, `!`).
-/// If no boundary exists within 256 chars, returns up to 256 chars as-is.
-fn clean_intent(text: &str) -> String {
+/// If no boundary exists within `char_limit` chars, returns up to `char_limit` chars as-is.
+fn clean_intent_with_limit(text: &str, char_limit: usize) -> String {
     let stripped: String = text
         .chars()
         .filter(|c| !matches!(c, '*' | '`' | '#' | '>'))
         .collect();
     let stripped = stripped.trim();
 
-    let limit = stripped.len().min(256);
+    let limit = stripped.len().min(char_limit);
     let chunk = &stripped[..limit];
     // Find the first sentence boundary and truncate there.
     if let Some(pos) = chunk.find(|c| matches!(c, '.' | '?' | '!')) {
@@ -115,6 +138,11 @@ fn clean_intent(text: &str) -> String {
     } else {
         chunk.trim().to_string()
     }
+}
+
+/// Strip markdown and return the first sentence up to 256 chars.
+fn clean_intent(text: &str) -> String {
+    clean_intent_with_limit(text, 256)
 }
 
 #[cfg(test)]
@@ -126,6 +154,11 @@ mod tests {
         // Should not panic with a nonexistent session
         // (project dir may or may not exist; either way, no panic)
         let _ = extract_intent();
+    }
+
+    #[test]
+    fn extract_intent_multi_zero_returns_none() {
+        assert!(extract_intent_multi(0).is_none());
     }
 
     #[test]
@@ -159,5 +192,17 @@ mod tests {
         let result = clean_intent("no sentence boundary here at all no punctuation");
         assert!(!result.is_empty());
         assert!(result.len() <= 256);
+    }
+
+    #[test]
+    fn clean_intent_with_limit_respects_limit() {
+        let result = clean_intent_with_limit("hello world no punctuation", 10);
+        assert!(result.len() <= 10);
+    }
+
+    #[test]
+    fn clean_intent_with_limit_truncates_at_sentence() {
+        let result = clean_intent_with_limit("Short. Much longer second sentence.", 200);
+        assert_eq!(result, "Short.");
     }
 }

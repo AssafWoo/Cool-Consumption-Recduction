@@ -204,7 +204,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
         let tokens = ccr_core::tokens::count_tokens(&filtered);
         if let Ok(mut embs) = ccr_core::summarizer::embed_batch(&[filtered.as_str()]) {
             if let Some(emb) = embs.pop() {
-                session.record(&delta_key, emb, tokens, &filtered, is_state);
+                session.record(&delta_key, emb, tokens, &filtered, is_state, None);
                 session.save(&sid);
             }
         }
@@ -230,7 +230,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
                 )
             } else {
                 let tokens = ccr_core::tokens::count_tokens(&filtered);
-                session.record(&delta_key, emb, tokens, &filtered, is_state);
+                session.record(&delta_key, emb, tokens, &filtered, is_state, None);
                 session.save(&sid);
                 filtered
             }

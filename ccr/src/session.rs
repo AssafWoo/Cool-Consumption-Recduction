@@ -27,6 +27,10 @@ pub struct SessionEntry {
     /// Enables accurate line-level delta beyond the 4000-char preview boundary.
     #[serde(default)]
     pub state_content: Option<String>,
+    /// Cosine similarity of this output's centroid vs the historical command centroid
+    /// at record time. None on the first run or when BERT is skipped.
+    #[serde(default)]
+    pub centroid_delta: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -163,6 +167,8 @@ impl SessionState {
     /// Record a new output entry, evicting the oldest if over capacity.
     /// `is_state`: if true (state commands like git, kubectl), stores the full
     /// content in `state_content` for accurate line-level delta beyond 4000 chars.
+    /// `centroid_delta`: cosine similarity of this output's centroid vs historical
+    /// at record time; `None` on first run or when BERT was skipped.
     pub fn record(
         &mut self,
         cmd: &str,
@@ -170,6 +176,7 @@ impl SessionState {
         tokens: usize,
         content: &str,
         is_state: bool,
+        centroid_delta: Option<f32>,
     ) {
         self.total_turns += 1;
         self.total_tokens += tokens;
@@ -192,12 +199,23 @@ impl SessionState {
             embedding,
             content_preview,
             state_content,
+            centroid_delta,
         };
 
         self.entries.push(entry);
         if self.entries.len() > MAX_ENTRIES {
             self.entries.remove(0);
         }
+    }
+
+    /// Returns the centroid_delta from the most recent entry for `cmd` that has one.
+    /// Used by adaptive pressure to detect stable (repetitive) command output.
+    pub fn last_centroid_delta(&self, cmd: &str) -> Option<f32> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.cmd == cmd && e.centroid_delta.is_some())
+            .and_then(|e| e.centroid_delta)
     }
 }
 
@@ -411,7 +429,7 @@ mod tests {
 
     fn make_session_with_entry(cmd: &str, embedding: Vec<f32>) -> SessionState {
         let mut s = SessionState::default();
-        s.record(cmd, embedding, 100, "test content", false);
+        s.record(cmd, embedding, 100, "test content", false, None);
         s
     }
 
