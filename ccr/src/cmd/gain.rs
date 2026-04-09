@@ -4,12 +4,17 @@ use owo_colors::{OwoColorize, Stream::Stdout, Style};
 use std::collections::BTreeMap;
 
 /// Pricing table for known Anthropic model families (input tokens, $/1M).
+/// More-specific prefixes must appear before less-specific ones because
+/// matching uses `.contains(prefix)` and stops at the first hit.
 const MODEL_PRICES: &[(&str, f64)] = &[
-    ("claude-opus-4",     15.00),
+    ("claude-opus-4-6",    5.00),  // Opus 4.6
+    ("claude-opus-4-5",    5.00),  // Opus 4.5
+    ("claude-opus-4",     15.00),  // Opus 4 / 4.1 (deprecated)
     ("claude-opus-3",     15.00),
     ("claude-sonnet-4",    3.00),
     ("claude-sonnet-3-7",  3.00),
     ("claude-sonnet-3-5",  3.00),
+    ("claude-haiku-4-5",   1.00),  // Haiku 4.5
     ("claude-haiku-4",     0.80),
     ("claude-haiku-3",     0.25),
 ];
