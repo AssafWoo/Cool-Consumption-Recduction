@@ -137,6 +137,48 @@ impl SessionState {
             })
     }
 
+    /// Returns true if any entry for `cmd` was recorded within the last `window_secs`.
+    /// Used to gate the polling suppressor without computing an embedding first.
+    pub fn has_recent_entry(&self, cmd: &str, window_secs: u64) -> bool {
+        let now = now_secs();
+        self.entries
+            .iter()
+            .rev()
+            .filter(|e| e.cmd == cmd && !e.embedding.is_empty())
+            .any(|e| now.saturating_sub(e.ts) <= window_secs)
+    }
+
+    /// Like `find_similar` but restricted to entries within `RECENT_WINDOW_SECS`
+    /// and using a lower similarity threshold (`RECENT_THRESHOLD`).
+    ///
+    /// Designed for the polling suppressor: in a tight loop (curl, gh, kubectl)
+    /// the same status response recurs within seconds. The reduced threshold
+    /// handles cases where only timestamps or counters differ between responses.
+    pub fn find_similar_recent(&self, cmd: &str, embedding: &[f32]) -> Option<SessionHit> {
+        const RECENT_WINDOW_SECS: u64 = 120;
+        const RECENT_THRESHOLD: f32 = 0.80;
+        let now = now_secs();
+        self.entries
+            .iter()
+            .rev()
+            .filter(|e| e.cmd == cmd && !e.embedding.is_empty())
+            // take_while works because entries are pushed in ascending time order
+            // and we reversed, so we walk newest-first and stop at first old entry.
+            .take_while(|e| now.saturating_sub(e.ts) <= RECENT_WINDOW_SECS)
+            .find_map(|e| {
+                let sim = cosine_sim(embedding, &e.embedding);
+                if sim >= RECENT_THRESHOLD {
+                    Some(SessionHit {
+                        turn: e.turn,
+                        age_secs: now.saturating_sub(e.ts),
+                        tokens_saved: e.tokens,
+                    })
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Check if the most recent run of this command produced exactly the same
     /// output.  Used for state commands (git, kubectl, …) where semantic
     /// similarity is unreliable — two different states can have near-identical
@@ -466,5 +508,49 @@ mod tests {
         let session = SessionState::default();
         let emb = vec![1.0, 0.0, 0.0];
         assert!(session.find_similar_with_threshold("cmd", &emb, 0.5).is_none());
+    }
+
+    #[test]
+    fn has_recent_entry_true_for_fresh_entry() {
+        let emb = vec![1.0, 0.0, 0.0];
+        let session = make_session_with_entry("curl", emb);
+        // Entry was just recorded (ts = now), so window of 120s should match.
+        assert!(session.has_recent_entry("curl", 120));
+    }
+
+    #[test]
+    fn has_recent_entry_false_for_different_cmd() {
+        let emb = vec![1.0, 0.0, 0.0];
+        let session = make_session_with_entry("curl", emb);
+        assert!(!session.has_recent_entry("gh", 120));
+    }
+
+    #[test]
+    fn has_recent_entry_false_for_empty_session() {
+        let session = SessionState::default();
+        assert!(!session.has_recent_entry("curl", 120));
+    }
+
+    #[test]
+    fn find_similar_recent_matches_identical_embedding() {
+        let emb = vec![1.0, 0.0, 0.0];
+        let session = make_session_with_entry("curl", emb.clone());
+        // Identical embedding — should match at the 0.80 threshold.
+        assert!(session.find_similar_recent("curl", &emb).is_some());
+    }
+
+    #[test]
+    fn find_similar_recent_no_match_for_different_cmd() {
+        let emb = vec![1.0, 0.0, 0.0];
+        let session = make_session_with_entry("curl", emb.clone());
+        assert!(session.find_similar_recent("gh", &emb).is_none());
+    }
+
+    #[test]
+    fn find_similar_recent_no_match_below_threshold() {
+        let emb_a = vec![1.0, 0.0, 0.0];
+        let emb_b = vec![0.0, 1.0, 0.0]; // cosine sim = 0.0
+        let session = make_session_with_entry("curl", emb_a);
+        assert!(session.find_similar_recent("curl", &emb_b).is_none());
     }
 }

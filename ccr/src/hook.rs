@@ -134,6 +134,19 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
         return Ok(None);
     }
 
+    // Fix 3: skip shell infrastructure commands that never produce meaningful
+    // output of their own. Any output attributed to these is leaked from a
+    // compound command (e.g. `sleep 30 && curl ...`) and should pass through
+    // unmodified rather than being logged as a low-savings run.
+    // Guard: only skip when there are no error signals in the output.
+    if command_hint.as_deref().map(is_no_output_cmd).unwrap_or(false)
+        && !output_text.contains("error")
+        && !output_text.contains("Error")
+        && !output_text.contains("invalid")
+    {
+        return Ok(None);
+    }
+
     let config = match crate::config_loader::load_config() {
         Ok(c) => c,
         Err(_) => return Ok(None),
@@ -191,6 +204,32 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
         };
         real_iter.take(2).collect::<Vec<_>>().join(" ")
     };
+
+    // Fix 1+2: Polling suppressor with timestamp-normalized embeddings.
+    // If the same command ran within the last 120 seconds, embed a
+    // timestamp-stripped version of the output and check similarity at a
+    // lower threshold (0.80 vs 0.92).  Catches polling loops where only
+    // clocks/counters/UUIDs differ between otherwise identical responses.
+    if session.has_recent_entry(&cmd_key, 120) {
+        let normalized = strip_temporal_noise(&output_text);
+        if let Ok(mut embs) = ccr_core::summarizer::embed_batch(&[normalized.as_str()]) {
+            if let Some(emb) = embs.pop() {
+                if let Some(hit) = session.find_similar_recent(&cmd_key, &emb) {
+                    let age = crate::session::format_age(hit.age_secs);
+                    let marker = format!(
+                        "[same output as turn {} ({} ago) — {} tokens saved]",
+                        hit.turn, age, hit.tokens_saved
+                    );
+                    let in_tok = ccr_core::tokens::count_tokens(&output_text);
+                    let out_tok = ccr_core::tokens::count_tokens(&marker);
+                    crate::util::append_analytics(&ccr_core::analytics::Analytics::new(
+                        in_tok, out_tok, command_hint.clone(), None, None,
+                    ));
+                    return Ok(Some(serde_json::to_string(&HookOutput { output: marker })?));
+                }
+            }
+        }
+    }
 
     let historical_centroid = session.command_centroid(&cmd_key).cloned();
 
@@ -704,6 +743,41 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+// ── Fix 3: infrastructure command skip ───────────────────────────────────────
+
+/// Commands that never produce meaningful output of their own.
+/// Any output attributed to them is compound-command stdout leakage.
+fn is_no_output_cmd(cmd: &str) -> bool {
+    matches!(cmd, "sleep" | "wait" | "true" | "false" | ":")
+}
+
+// ── Fix 2: timestamp/counter normalization for polling dedup ─────────────────
+
+/// Strip temporal noise (timestamps, counters, UUIDs, git SHAs, IPs) from
+/// `text` before computing the embedding for polling suppressor B3 comparison.
+/// The output itself is never modified — only the embedding input is normalized.
+fn strip_temporal_noise(text: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?x)
+            \d{4}-\d{2}-\d{2}[T\ ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?  # ISO timestamp
+            | \d{2}:\d{2}:\d{2}(\.\d+)?          # HH:MM:SS
+            | \d{2}:\d{2}                          # HH:MM
+            | \b\d{10,13}\b                        # unix timestamp (10-13 digits)
+            | \b\d+(\.\d+)?\s*(ms|µs|ns|seconds?|mins?|hours?) # durations
+            | \b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b  # UUID
+            | \b[0-9a-f]{40}\b                     # git SHA
+            | \b0x[0-9a-f]{6,}\b                   # hex address
+            | \b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b  # IPv4
+            ",
+        )
+        .expect("strip_temporal_noise regex")
+    });
+    re.replace_all(text, "").to_string()
+}
+
 // ── Adaptive pressure helper (Feature 2) ─────────────────────────────────────
 
 /// Convert centroid similarity to an additive pressure modifier.
@@ -994,5 +1068,57 @@ mod tests {
         let large = read_dedup_threshold(500);
         assert!(small <= medium);
         assert!(medium <= large);
+    }
+
+    #[test]
+    fn is_no_output_cmd_matches_infrastructure() {
+        assert!(is_no_output_cmd("sleep"));
+        assert!(is_no_output_cmd("wait"));
+        assert!(is_no_output_cmd("true"));
+        assert!(is_no_output_cmd("false"));
+        assert!(is_no_output_cmd(":"));
+    }
+
+    #[test]
+    fn is_no_output_cmd_does_not_match_real_commands() {
+        assert!(!is_no_output_cmd("cargo"));
+        assert!(!is_no_output_cmd("git"));
+        assert!(!is_no_output_cmd("curl"));
+        assert!(!is_no_output_cmd("cd"));
+        assert!(!is_no_output_cmd("echo"));
+        assert!(!is_no_output_cmd("export"));
+    }
+
+    #[test]
+    fn strip_temporal_noise_removes_iso_timestamp() {
+        let input = "Started at 2026-04-08T21:16:30Z, status: running";
+        let out = strip_temporal_noise(input);
+        assert!(!out.contains("2026-04-08"), "got: {}", out);
+        assert!(out.contains("status: running"), "got: {}", out);
+    }
+
+    #[test]
+    fn strip_temporal_noise_removes_hms_time() {
+        let input = "Log entry 21:16:30 — process started";
+        let out = strip_temporal_noise(input);
+        assert!(!out.contains("21:16:30"), "got: {}", out);
+        assert!(out.contains("process started"), "got: {}", out);
+    }
+
+    #[test]
+    fn strip_temporal_noise_removes_uuid() {
+        let input = "id=550e8400-e29b-41d4-a716-446655440000 status=ok";
+        let out = strip_temporal_noise(input);
+        assert!(!out.contains("550e8400"), "got: {}", out);
+        assert!(out.contains("status=ok"), "got: {}", out);
+    }
+
+    #[test]
+    fn strip_temporal_noise_preserves_semantic_content() {
+        let input = "Build failed: missing symbol `foo` in auth.rs";
+        let out = strip_temporal_noise(input);
+        assert!(out.contains("Build failed"), "got: {}", out);
+        assert!(out.contains("missing symbol"), "got: {}", out);
+        assert!(out.contains("auth.rs"), "got: {}", out);
     }
 }
