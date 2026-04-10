@@ -12,7 +12,7 @@
 ///   `ccr_core::summarizer::noise_scores(lines: &[&str]) -> anyhow::Result<Vec<f32>>`
 ///
 /// Run with: cargo test -p ccr-core --test idea6_noise_classifier
-use ccr_core::summarizer::noise_scores;
+use panda_core::summarizer::noise_scores;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

@@ -7,8 +7,8 @@
 ///   3. Critical lines (error/warning in content) are NEVER matched by noise patterns.
 ///
 /// Run with: cargo test -p ccr-core --test pattern_filters
-use ccr_core::config::{CommandConfig, FilterAction, FilterPattern, SimpleAction};
-use ccr_core::patterns::PatternFilter;
+use panda_core::config::{CommandConfig, FilterAction, FilterPattern, SimpleAction};
+use panda_core::patterns::PatternFilter;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

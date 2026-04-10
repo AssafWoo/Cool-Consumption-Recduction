@@ -10,7 +10,7 @@
 ///   ) -> SummarizeResult`
 ///
 /// Run with: cargo test -p ccr-core --test idea5_anchoring
-use ccr_core::summarizer::summarize_with_anchoring;
+use panda_core::summarizer::summarize_with_anchoring;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -152,7 +152,7 @@ fn anchoring_does_not_blow_up_budget() {
 /// anchor_neighbors=0 must produce the same result as plain summarize.
 #[test]
 fn zero_anchor_neighbors_matches_plain_summarize() {
-    use ccr_core::summarizer::summarize;
+    use panda_core::summarizer::summarize;
 
     let mut lines = noise(200);
     lines[100] = "error[E0308]: mismatched types".to_string();

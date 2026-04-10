@@ -6,9 +6,9 @@
 ///   3. IDs increment correctly across multiple collapses
 ///   4. drain() clears the block list
 ///   5. Pipeline result carries zoom_blocks when zoom is enabled
-use ccr_core::config::{CommandConfig, FilterAction, FilterPattern, SimpleAction};
-use ccr_core::patterns::PatternFilter;
-use ccr_core::zoom;
+use panda_core::config::{CommandConfig, FilterAction, FilterPattern, SimpleAction};
+use panda_core::patterns::PatternFilter;
+use panda_core::zoom;
 
 fn make_collapse_filter() -> PatternFilter {
     PatternFilter::new(&CommandConfig {
@@ -127,8 +127,8 @@ fn remove_action_does_not_register_zoom_block() {
 
 #[test]
 fn pipeline_result_carries_zoom_blocks_when_enabled() {
-    use ccr_core::config::{CcrConfig, CommandConfig};
-    use ccr_core::pipeline::Pipeline;
+    use panda_core::config::{CcrConfig, CommandConfig};
+    use panda_core::pipeline::Pipeline;
     use std::collections::HashMap;
 
     zoom::enable();
@@ -175,7 +175,7 @@ fn pipeline_result_carries_zoom_blocks_when_enabled() {
 
 #[test]
 fn pipeline_result_empty_zoom_blocks_when_disabled() {
-    use ccr_core::pipeline::Pipeline;
+    use panda_core::pipeline::Pipeline;
 
     zoom::disable();
 
@@ -195,4 +195,4 @@ fn pipeline_result_empty_zoom_blocks_when_disabled() {
     );
 }
 
-use ccr_core::config::CcrConfig;
+use panda_core::config::CcrConfig;

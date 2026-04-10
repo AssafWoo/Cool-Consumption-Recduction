@@ -9,7 +9,7 @@
 ///   `ccr_core::summarizer::entropy_adjusted_budget(text: &str, max_budget: usize) -> usize`
 ///
 /// Run with: cargo test -p ccr-core --test idea4_entropy
-use ccr_core::summarizer::{embed_batch, entropy_adjusted_budget, semantic_entropy};
+use panda_core::summarizer::{embed_batch, entropy_adjusted_budget, semantic_entropy};
 
 // ── helper ────────────────────────────────────────────────────────────────────
 
@@ -214,8 +214,8 @@ fn short_input_returns_max_budget() {
 /// yields fewer tokens than using the raw max_budget.
 #[test]
 fn entropy_budget_saves_tokens_on_npm_style_output() {
-    use ccr_core::summarizer::summarize;
-    use ccr_core::tokens::count_tokens;
+    use panda_core::summarizer::summarize;
+    use panda_core::tokens::count_tokens;
 
     // Simulate `npm install` output: hundreds of nearly identical "added X" lines
     let lines: Vec<String> = (1..=200)

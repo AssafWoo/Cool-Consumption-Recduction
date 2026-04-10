@@ -8,7 +8,7 @@
 ///   `ccr_core::summarizer::summarize_with_clustering(text: &str, budget: usize) -> SummarizeResult`
 ///
 /// Run with: cargo test -p ccr-core --test idea1_clustering
-use ccr_core::summarizer::summarize_with_clustering;
+use panda_core::summarizer::summarize_with_clustering;
 
 // ── helper ────────────────────────────────────────────────────────────────────
 

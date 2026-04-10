@@ -10,7 +10,7 @@
 ///   ) -> SummarizeResult`
 ///
 /// Run with: cargo test -p ccr-core --test idea2_intent_query
-use ccr_core::summarizer::summarize_with_intent;
+use panda_core::summarizer::summarize_with_intent;
 
 // ── helper ────────────────────────────────────────────────────────────────────
 
@@ -76,7 +76,7 @@ fn memory_intent_surfaces_memory_lines() {
 /// when the two topics diverge.
 #[test]
 fn intent_produces_different_selection_than_command_alone() {
-    use ccr_core::summarizer::summarize_with_query;
+    use panda_core::summarizer::summarize_with_query;
 
     let mut lines: Vec<String> = (0..60)
         .map(|i| format!("compiling generic dependency artifact module {}", i))
@@ -141,7 +141,7 @@ fn hard_keep_errors_survive_regardless_of_intent() {
 /// Empty intent string should fall back to command-only query behavior.
 #[test]
 fn empty_intent_falls_back_to_command_query() {
-    use ccr_core::summarizer::summarize_with_query;
+    use panda_core::summarizer::summarize_with_query;
 
     let lines: Vec<String> = (0..250).map(|i| format!("log output line number {}", i)).collect();
     let input = lines.join("\n");
