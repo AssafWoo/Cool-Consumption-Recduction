@@ -126,7 +126,7 @@ jobs:
           # 7. Run a real git command end-to-end
           git init /tmp/smoke-repo -q
           git -C /tmp/smoke-repo config user.email "ci@ccr.test"
-          git -C /tmp/smoke-repo config user.name "CCR CI"
+          git -C /tmp/smoke-repo config user.name "PandaFilter CI"
           git -C /tmp/smoke-repo commit --allow-empty -q -m "init"
           $BIN run git -C /tmp/smoke-repo status
 

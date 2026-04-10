@@ -117,9 +117,9 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         level: String,
     },
-    /// Check integrity of installed CCR hook scripts
+    /// Check integrity of installed PandaFilter hook scripts
     Verify,
-    /// Update CCR (use `brew upgrade assafwoo/ccr/ccr` instead)
+    /// Update PandaFilter (use `brew upgrade assafwoo/pandafilter/ccr` instead)
     Update,
     /// Compress a conversation JSON to reduce token count
     Compress {
@@ -194,7 +194,7 @@ fn main() {
             // as version "64" (inferred from "arm64" in the asset URL). brew upgrade
             // then skips the update because it thinks 64 > 0.5.x.
             let has_bad_keg = std::process::Command::new("brew")
-                .args(["--cellar", "assafwoo/ccr/ccr"])
+                .args(["--cellar", "assafwoo/pandafilter/ccr"])
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -211,15 +211,15 @@ fn main() {
                 println!("formula). brew upgrade won't fix it because 64 > 0.5.x.");
                 println!();
                 println!("Fix it with a one-time reinstall:");
-                println!("  brew reinstall assafwoo/ccr/ccr");
+                println!("  brew reinstall assafwoo/pandafilter/ccr");
                 println!();
                 println!("After that, future updates work normally with:");
-                println!("  brew upgrade assafwoo/ccr/ccr");
+                println!("  brew upgrade assafwoo/pandafilter/ccr");
             } else {
                 println!("ccr update is deprecated.");
                 println!();
                 println!("Update with Homebrew:");
-                println!("  brew update && brew upgrade assafwoo/ccr/ccr");
+                println!("  brew update && brew upgrade assafwoo/pandafilter/ccr");
             }
             Ok(())
         }

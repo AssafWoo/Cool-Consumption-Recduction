@@ -2,19 +2,19 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in CCR, please **do not open a public GitHub issue**.
+If you discover a security vulnerability in PandaFilter, please **do not open a public GitHub issue**.
 
 Report it privately via GitHub's built-in security advisory system:
-👉 [Open a private security advisory](https://github.com/AssafWoo/homebrew-ccr/security/advisories/new)
+👉 [Open a private security advisory](https://github.com/AssafWoo/PandaFilter/security/advisories/new)
 
 - **Response time**: We aim to acknowledge reports within 48 hours
 - **Disclosure**: We follow responsible disclosure practices (90-day embargo)
 
 ---
 
-## Why CCR Is Sensitive
+## Why PandaFilter Is Sensitive
 
-CCR is a CLI tool that sits between Claude Code and your shell. It:
+PandaFilter is a CLI tool that sits between Claude Code and your shell. It:
 - Intercepts and rewrites shell commands via a `PreToolUse` hook
 - Reads and compresses tool output via a `PostToolUse` hook
 - Executes commands on your behalf via `ccr run`

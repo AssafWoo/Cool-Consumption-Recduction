@@ -1,6 +1,6 @@
 class Ccr < Formula
   desc "LLM token optimizer for Claude Code — 60-90% token savings on dev operations"
-  homepage "https://github.com/AssafWoo/homebrew-ccr"
+  homepage "https://github.com/AssafWoo/PandaFilter"
   license "MIT"
   version "0.6.9"
 
@@ -9,12 +9,12 @@ class Ccr < Formula
   # Prebuilt binaries — no Rust/LLVM build dependencies, installs in seconds.
   # Each tarball contains the ccr binary + libonnxruntime dylib bundled together.
   on_arm do
-    url "https://github.com/AssafWoo/homebrew-ccr/releases/download/v0.6.9/ccr-macos-arm64.tar.gz"
+    url "https://github.com/AssafWoo/PandaFilter/releases/download/v0.6.9/ccr-macos-arm64.tar.gz"
     sha256 "01c0d1df90319fee4d735dc1b78e0bb6895882f0e4fdf2804e5f98a8cb63c758"
   end
 
   on_intel do
-    url "https://github.com/AssafWoo/homebrew-ccr/releases/download/v0.6.9/ccr-macos-x86_64.tar.gz"
+    url "https://github.com/AssafWoo/PandaFilter/releases/download/v0.6.9/ccr-macos-x86_64.tar.gz"
     sha256 "80d98fe2f42fae4a11f66dea6882b253a65f293fe402708608e81aa2a9dc7573"
   end
 
@@ -38,7 +38,7 @@ class Ccr < Formula
 
   def caveats
     <<~EOS
-      CCR setup runs automatically during install (hooks + BERT model download).
+      PandaFilter setup runs automatically during install (hooks + BERT model download).
       If you see hook errors, re-run manually:
         ccr init                      # Claude Code
         ccr init --agent cursor       # Cursor
