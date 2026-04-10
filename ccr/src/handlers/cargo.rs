@@ -62,7 +62,14 @@ impl Handler for CargoHandler {
         let subcmd = cargo_subcmd(args);
         match subcmd {
             "build" | "check" | "clippy" => filter_build(output),
-            "test" | "nextest" => filter_test(output),
+            "test" => filter_test(output),
+            "nextest" => {
+                if args.iter().any(|a| a == "run") {
+                    filter_nextest(output)
+                } else {
+                    output.to_string()
+                }
+            }
             _ => output.to_string(),
         }
     }
@@ -174,8 +181,13 @@ fn filter_build(output: &str) -> String {
         }
     }
 
+    const MAX_ERRORS: usize = 15;
     let mut out: Vec<String> = Vec::new();
-    out.extend(errors.iter().cloned());
+    let shown = errors.len().min(MAX_ERRORS);
+    out.extend(errors[..shown].iter().cloned());
+    if errors.len() > MAX_ERRORS {
+        out.push(format!("[+{} more errors]", errors.len() - MAX_ERRORS));
+    }
     if !warnings.is_empty() {
         out.push(format!("[{} warnings]", warnings.len()));
         let grouped = group_clippy_warnings(&warnings);
@@ -272,6 +284,38 @@ fn filter_test(output: &str) -> String {
         out.push(s);
     }
 
+    out.join("\n")
+}
+
+/// Filter `cargo nextest run` output.
+/// Keeps FAIL lines and the Summary line; drops PASS and "running N tests" lines.
+fn filter_nextest(output: &str) -> String {
+    let mut failures: Vec<String> = Vec::new();
+    let mut summary: Option<String> = None;
+    let mut found_any = false;
+
+    for line in output.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.starts_with("FAIL") {
+            failures.push(line.to_string());
+            found_any = true;
+        } else if t.starts_with("Summary") {
+            summary = Some(line.to_string());
+            found_any = true;
+        }
+    }
+
+    if !found_any {
+        return output.to_string();
+    }
+
+    let mut out: Vec<String> = failures;
+    if let Some(s) = summary {
+        out.push(s);
+    }
     out.join("\n")
 }
 
@@ -417,6 +461,70 @@ mod tests {
     fn cargo_subcmd_empty() {
         let args: Vec<String> = vec!["cargo".into()];
         assert_eq!(cargo_subcmd(&args), "");
+    }
+
+    // ── error cap ────────────────────────────────────────────────────────────
+
+    fn make_error_json(i: usize) -> String {
+        format!(
+            r#"{{"reason":"compiler-message","message":{{"level":"error","message":"error {}","spans":[]}}}}"#,
+            i
+        )
+    }
+
+    #[test]
+    fn errors_capped_at_15_shows_overflow_line() {
+        let lines: Vec<String> = (0..20).map(make_error_json).collect();
+        let output = lines.join("\n");
+        let result = filter_build(&output);
+        let error_lines: Vec<&str> = result.lines().filter(|l| l.starts_with("error:")).collect();
+        assert_eq!(error_lines.len(), 15, "should show exactly 15 errors");
+        assert!(result.contains("[+5 more errors]"), "should show overflow line");
+    }
+
+    #[test]
+    fn errors_under_cap_no_overflow_line() {
+        let lines: Vec<String> = (0..10).map(make_error_json).collect();
+        let output = lines.join("\n");
+        let result = filter_build(&output);
+        assert!(!result.contains("more errors"), "should not show overflow line");
+    }
+
+    // ── filter_nextest ───────────────────────────────────────────────────────
+
+    #[test]
+    fn nextest_fail_and_summary_kept_pass_dropped() {
+        let output = "\
+PASS [0.001s] mycrate::tests::passing_test
+FAIL [0.002s] mycrate::tests::failing_test
+Summary [0.003s] 2 tests run, 1 failed
+";
+        let result = filter_nextest(output);
+        assert!(result.contains("FAIL"), "should keep FAIL line");
+        assert!(result.contains("Summary"), "should keep Summary line");
+        assert!(!result.contains("PASS"), "should drop PASS lines");
+    }
+
+    #[test]
+    fn nextest_all_pass_returns_summary_only() {
+        let output = "\
+PASS [0.001s] mycrate::tests::test_a
+PASS [0.001s] mycrate::tests::test_b
+Summary [0.002s] 2 tests run, 0 failed
+";
+        let result = filter_nextest(output);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 1, "should return only summary line");
+        assert!(lines[0].starts_with("Summary"));
+    }
+
+    #[test]
+    fn nextest_list_passthrough() {
+        let handler = CargoHandler;
+        let args: Vec<String> = vec!["cargo".into(), "nextest".into(), "list".into()];
+        let output = "mycrate::tests::test_a\nmycrate::tests::test_b\n";
+        let result = handler.filter(output, &args);
+        assert_eq!(result, output, "cargo nextest list should pass through unchanged");
     }
 
     #[test]

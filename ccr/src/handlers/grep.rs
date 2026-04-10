@@ -3,6 +3,81 @@ use std::collections::BTreeMap;
 
 pub struct GrepHandler;
 
+/// Extract the search pattern from grep/rg args.
+/// Handles `-e pattern` explicitly; otherwise returns the first non-flag argument.
+fn find_pattern_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().peekable();
+    // Skip the command name (first arg)
+    iter.next();
+    while let Some(a) = iter.next() {
+        if a == "-e" || a == "--regexp" {
+            if let Some(pat) = iter.next() {
+                return Some(pat.clone());
+            }
+        } else if a.starts_with("-e") {
+            return Some(a[2..].to_string());
+        } else if a.starts_with("--regexp=") {
+            return Some(a["--regexp=".len()..].to_string());
+        } else if a.starts_with('-') {
+            // Flag that takes a value — skip value for known flags
+            let flag_with_value = ["-A", "-B", "-C", "-m", "--include", "--exclude",
+                                    "--after-context", "--before-context", "--context",
+                                    "--max-count", "-f", "--file", "--color", "--colours"];
+            if flag_with_value.iter().any(|f| a == f) {
+                iter.next(); // skip value
+            }
+            // Otherwise just a boolean flag, skip it
+        } else {
+            // First non-flag arg is the pattern
+            return Some(a.clone());
+        }
+    }
+    None
+}
+
+/// Truncate a long line to `max` chars, centering the window around the first
+/// occurrence of `pattern`. Falls back to left-truncation if no match.
+fn truncate_centered(line: &str, pattern: Option<&str>, max: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= max {
+        return line.to_string();
+    }
+
+    // Try to find match position (char index)
+    let match_char_idx = pattern.and_then(|pat| {
+        let lower_line: String = chars.iter().collect::<String>().to_lowercase();
+        let lower_pat = pat.to_lowercase();
+        lower_line.find(&lower_pat).map(|byte_pos| {
+            // Convert byte offset to char index
+            line[..byte_pos].chars().count()
+        })
+    });
+
+    let match_idx = match match_char_idx {
+        Some(idx) => idx,
+        None => {
+            // Fallback: left truncation
+            return format!("{}…", chars[..max - 1].iter().collect::<String>());
+        }
+    };
+
+    // Center a window of `max` chars around the match midpoint
+    let half = max / 2;
+    let start = if match_idx > half { match_idx - half } else { 0 };
+    let end = (start + max).min(chars.len());
+    // Adjust start if end was clamped
+    let start = if end == chars.len() && end > max {
+        end - max
+    } else {
+        start
+    };
+
+    let window: String = chars[start..end].iter().collect();
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < chars.len() { "…" } else { "" };
+    format!("{}{}{}", prefix, window, suffix)
+}
+
 impl Handler for GrepHandler {
     fn rewrite_args(&self, args: &[String]) -> Vec<String> {
         let mut out = args.to_vec();
@@ -16,13 +91,15 @@ impl Handler for GrepHandler {
         out
     }
 
-    fn filter(&self, output: &str, _args: &[String]) -> String {
+    fn filter(&self, output: &str, args: &[String]) -> String {
         // Detect if output uses "filename:lineno:match" format (grep -n or rg default)
         let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
 
         if lines.is_empty() {
             return output.to_string();
         }
+
+        let pattern = find_pattern_arg(args);
 
         // Try to group by filename
         let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -32,12 +109,12 @@ impl Handler for GrepHandler {
         for line in &lines {
             if let Some((file, rest)) = split_grep_line(line) {
                 let entry = by_file.entry(file).or_default();
-                let truncated = truncate_line(rest, 120);
+                let truncated = truncate_centered(rest, pattern.as_deref(), 120);
                 entry.push(truncated);
                 total_matches += 1;
             } else {
                 // Could be a filename header (rg --heading) or match without file
-                ungrouped.push(truncate_line(line, 120));
+                ungrouped.push(truncate_centered(line, pattern.as_deref(), 120));
                 total_matches += 1;
             }
         }
@@ -186,6 +263,43 @@ mod tests {
             "should not have overflow message, got: {}",
             result
         );
+    }
+
+    #[test]
+    fn truncate_centered_match_in_middle_stays_in_window() {
+        // Line of 200 chars with "TARGET" at position 150
+        let prefix = "a".repeat(150);
+        let suffix = "b".repeat(44);
+        let line = format!("{}TARGET{}", prefix, suffix);
+        assert!(line.len() > 120);
+        let result = truncate_centered(&line, Some("TARGET"), 120);
+        assert!(result.contains("TARGET"), "match should be visible in window");
+        // Result should be at most 120 chars + 2 ellipsis chars
+        let result_chars: Vec<char> = result.chars().collect();
+        assert!(result_chars.len() <= 122, "truncated line too long: {}", result_chars.len());
+    }
+
+    #[test]
+    fn truncate_centered_no_match_falls_back_to_left() {
+        let long = "x".repeat(200);
+        let result = truncate_centered(&long, Some("notfound"), 120);
+        // Left truncation: first char should be 'x', ends with '…'
+        assert!(result.ends_with('…'), "should end with ellipsis");
+        assert!(!result.starts_with('…'), "should not start with ellipsis (left truncation)");
+    }
+
+    #[test]
+    fn find_pattern_arg_extracts_e_flag() {
+        let args: Vec<String> = vec!["grep".into(), "-e".into(), "mypattern".into(), "file.txt".into()];
+        let result = find_pattern_arg(&args);
+        assert_eq!(result.as_deref(), Some("mypattern"));
+    }
+
+    #[test]
+    fn find_pattern_arg_first_non_flag() {
+        let args: Vec<String> = vec!["grep".into(), "-r".into(), "-n".into(), "searchterm".into()];
+        let result = find_pattern_arg(&args);
+        assert_eq!(result.as_deref(), Some("searchterm"));
     }
 
     #[test]

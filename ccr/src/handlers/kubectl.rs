@@ -16,7 +16,18 @@ impl Handler for KubectlHandler {
     fn filter(&self, output: &str, args: &[String]) -> String {
         let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
         match subcmd {
-            "get" => filter_get(output),
+            "get" => {
+                let resource = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                let is_pods = resource == "pods" || resource == "pod";
+                let has_all_ns = args.iter().any(|a| a == "--all-namespaces" || a == "-A");
+                // pod/name syntax: contains a slash
+                let is_specific = resource.contains('/');
+                if is_pods && !has_all_ns && !is_specific {
+                    filter_get_pods(output)
+                } else {
+                    filter_get(output)
+                }
+            }
             "logs" => filter_logs(output),
             "describe" => filter_describe(output),
             "apply" | "delete" | "rollout" => filter_changes(output),
@@ -142,6 +153,116 @@ fn filter_get(output: &str) -> String {
     if total_data > MAX_GET_ROWS {
         out.push(format!("[+{} more]", total_data - MAX_GET_ROWS));
     }
+
+    out.join("\n")
+}
+
+const HEALTHY_STATUSES: &[&str] = &["Running", "Completed"];
+
+fn filter_get_pods(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.is_empty() {
+        return output.to_string();
+    }
+
+    // Find header line
+    let header_idx = match lines.iter().position(|l| !l.trim().is_empty()) {
+        Some(i) => i,
+        None => return output.to_string(),
+    };
+
+    let header = lines[header_idx];
+
+    // Find STATUS column start by scanning header words
+    let status_col_start: Option<usize> = {
+        let mut found = None;
+        let mut in_word = false;
+        let mut word_start = 0;
+        let mut buf = String::new();
+        for (i, c) in header.char_indices() {
+            if c != ' ' && !in_word {
+                word_start = i;
+                buf.clear();
+                in_word = true;
+            }
+            if in_word {
+                if c == ' ' {
+                    if buf.eq_ignore_ascii_case("STATUS") {
+                        found = Some(word_start);
+                        break;
+                    }
+                    in_word = false;
+                } else {
+                    buf.push(c);
+                }
+            }
+        }
+        // Check final word
+        if found.is_none() && in_word && buf.eq_ignore_ascii_case("STATUS") {
+            found = Some(word_start);
+        }
+        found
+    };
+
+    let status_col = match status_col_start {
+        Some(c) => c,
+        None => return filter_get(output),
+    };
+
+    let data_lines: Vec<&str> = lines
+        .iter()
+        .skip(header_idx + 1)
+        .filter(|l| !l.trim().is_empty())
+        .copied()
+        .collect();
+
+    if data_lines.is_empty() {
+        return output.to_string();
+    }
+
+    // Extract status from a pod line
+    let pod_status = |line: &str| -> String {
+        if status_col >= line.len() {
+            return String::new();
+        }
+        line[status_col..].split_whitespace().next().unwrap_or("").to_string()
+    };
+
+    let mut running = 0usize;
+    let mut problem_pods: Vec<&str> = Vec::new();
+    let mut status_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    for line in &data_lines {
+        let status = pod_status(line);
+        let healthy = HEALTHY_STATUSES.iter().any(|s| status.starts_with(*s));
+        if healthy {
+            running += 1;
+        } else {
+            problem_pods.push(line);
+            *status_counts.entry(status).or_insert(0) += 1;
+        }
+    }
+
+    if problem_pods.is_empty() {
+        return format!("[{} pods, all running]", data_lines.len());
+    }
+
+    // Emit header + problem pods + summary
+    let mut out: Vec<String> = Vec::new();
+    out.push(header.to_string());
+    for line in &problem_pods {
+        out.push(line.to_string());
+    }
+
+    let mut counts_parts: Vec<String> = Vec::new();
+    if running > 0 {
+        counts_parts.push(format!("{} running", running));
+    }
+    for (status, count) in &status_counts {
+        counts_parts.push(format!("{} {}", count, status));
+    }
+    out.push(format!("[{}]", counts_parts.join(", ")));
 
     out.join("\n")
 }
@@ -313,5 +434,48 @@ pod/debug-pod-xyz unchanged
         let result = filter_changes(input);
         // passthrough preserves the original (including trailing newline)
         assert_eq!(result, input);
+    }
+
+    // --- filter_get_pods ---
+
+    const ALL_RUNNING_PODS: &str = "\
+NAME                          READY   STATUS    RESTARTS   AGE
+my-app-6d4f8b9c7-xk2pq        1/1     Running   3          5d
+another-pod-5b7c9d8f4-qr3mn   2/2     Running   0          2h
+";
+
+    const MIXED_PODS: &str = "\
+NAME                          READY   STATUS             RESTARTS   AGE
+my-app-6d4f8b9c7-xk2pq        1/1     Running            3          5d
+bad-pod-5b7c9d8f4-qr3mn       0/1     CrashLoopBackOff   5          1h
+pending-pod-abc123             0/1     Pending            0          10m
+";
+
+    #[test]
+    fn all_running_returns_single_summary_line() {
+        let handler = KubectlHandler;
+        let args: Vec<String> = vec!["kubectl".into(), "get".into(), "pods".into()];
+        let result = handler.filter(ALL_RUNNING_PODS, &args);
+        assert_eq!(result, "[2 pods, all running]");
+    }
+
+    #[test]
+    fn mixed_pods_shows_only_problem_pods_with_counts() {
+        let handler = KubectlHandler;
+        let args: Vec<String> = vec!["kubectl".into(), "get".into(), "pods".into()];
+        let result = handler.filter(MIXED_PODS, &args);
+        assert!(result.contains("bad-pod"), "should show problem pod");
+        assert!(result.contains("pending-pod"), "should show pending pod");
+        assert!(!result.contains("my-app-6d4f8b9c7"), "should not show running pods");
+        assert!(result.contains("1 running"), "should show running count");
+    }
+
+    #[test]
+    fn all_namespaces_falls_back_to_filter_get() {
+        let handler = KubectlHandler;
+        let args: Vec<String> = vec!["kubectl".into(), "get".into(), "pods".into(), "-A".into()];
+        let result = handler.filter(ALL_RUNNING_PODS, &args);
+        // filter_get output should have column headers like NAME STATUS READY
+        assert!(result.contains("NAME"), "should fall back to filter_get output");
     }
 }

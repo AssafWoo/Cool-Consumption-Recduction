@@ -131,6 +131,22 @@ fn filter_ps(output: &str) -> String {
     out.join("\n")
 }
 
+/// Parse a Docker image size string (e.g. "1.23GB", "456MB", "789kB", "512B") into MB.
+fn parse_docker_size_mb(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("GB") {
+        n.trim().parse::<f64>().ok().map(|v| v * 1024.0)
+    } else if let Some(n) = s.strip_suffix("MB") {
+        n.trim().parse::<f64>().ok()
+    } else if let Some(n) = s.strip_suffix("kB") {
+        n.trim().parse::<f64>().ok().map(|v| v / 1024.0)
+    } else if let Some(n) = s.strip_suffix("B") {
+        n.trim().parse::<f64>().ok().map(|v| v / (1024.0 * 1024.0))
+    } else {
+        None
+    }
+}
+
 fn filter_images(output: &str) -> String {
     // Keep only repo, tag, and size
     let lines: Vec<&str> = output.lines().collect();
@@ -139,6 +155,9 @@ fn filter_images(output: &str) -> String {
     }
 
     let mut out: Vec<String> = Vec::new();
+    let mut total_mb = 0.0f64;
+    let mut parseable_count = 0usize;
+
     for (i, line) in lines.iter().enumerate() {
         if i == 0 {
             out.push("REPOSITORY           TAG       SIZE".to_string());
@@ -149,12 +168,22 @@ fn filter_images(output: &str) -> String {
                 let repo = parts[0];
                 let tag = parts[1];
                 let size = parts.last().unwrap_or(&"");
+                if let Some(mb) = parse_docker_size_mb(size) {
+                    total_mb += mb;
+                    parseable_count += 1;
+                }
                 out.push(format!("{:<20} {:<9} {}", repo, tag, size));
             } else {
                 out.push(line.to_string());
             }
         }
     }
+
+    if parseable_count > 0 {
+        let total_gb = total_mb / 1024.0;
+        out.push(format!("[total: {:.1} GB across {} images]", total_gb, parseable_count));
+    }
+
     out.join("\n")
 }
 
@@ -280,5 +309,57 @@ mod tests {
         let input = args(&["docker", "pull", "nginx"]);
         let result = handler().rewrite_args(&input);
         assert_eq!(result, input);
+    }
+
+    // --- parse_docker_size_mb ---
+
+    #[test]
+    fn parse_size_gb() {
+        let mb = parse_docker_size_mb("1.5GB").unwrap();
+        assert!((mb - 1536.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_size_mb() {
+        let mb = parse_docker_size_mb("256MB").unwrap();
+        assert!((mb - 256.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_size_kb() {
+        let mb = parse_docker_size_mb("512kB").unwrap();
+        assert!((mb - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_size_bytes() {
+        let mb = parse_docker_size_mb("1048576B").unwrap();
+        assert!((mb - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_size_unknown_returns_none() {
+        assert!(parse_docker_size_mb("???").is_none());
+    }
+
+    // --- filter_images total line ---
+
+    #[test]
+    fn images_total_line_appended() {
+        // 7-column format: REPOSITORY TAG IMAGE_ID CREATED_DATE CREATED_TIME CREATED_AGO SIZE
+        let input = "\
+REPOSITORY           TAG       IMAGE ID      CREATED       SIZE
+nginx                latest    abc123def456  2 days ago    1 week ago    2 weeks ago    128MB
+redis                alpine    def789abc012  1 week ago    1 week ago    1 month ago    64MB
+";
+        let result = filter_images(input);
+        assert!(result.contains("[total:"), "should append total line, got:\n{}", result);
+    }
+
+    #[test]
+    fn images_no_total_when_no_parseable_rows() {
+        let input = "REPOSITORY           TAG       SIZE\n";
+        let result = filter_images(input);
+        assert!(!result.contains("[total:"), "should not show total with no data rows");
     }
 }

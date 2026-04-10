@@ -1,10 +1,49 @@
-# CCR — Cool Cost Reduction
+<p align="center">
+  <img src="assets/logo.jpg" alt="PandaFilter" width="160" />
+</p>
 
-> **60–95% token savings on Claude Code, Cursor, Gemini CLI, Cline, and VS Code Copilot tool outputs.** CCR sits between the agent and your tools, compressing what the model reads without changing what you ask it to do.
+<h1 align="center">PandaFilter</h1>
+
+<p align="center"><strong>Cut your AI agent's token bill by 60–95% — transparently, locally, automatically.</strong></p>
+
+<p align="center">Built by <a href="https://github.com/AssafWoo">Assaf Petronio</a></p>
 
 ---
 
-## Token Savings
+## Quick start
+
+```bash
+brew tap AssafWoo/pandafilter
+brew install ccr
+```
+
+**Linux / any platform:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AssafWoo/homebrew-pandafilter/main/install.sh | bash
+```
+
+> **First run:** CCR downloads the BERT model (~90 MB, `all-MiniLM-L6-v2`) from HuggingFace and caches it at `~/.cache/huggingface/`. Subsequent runs are instant.
+
+---
+
+## Why CCR?
+
+AI coding agents are expensive to run — not because of what you ask them, but because of what they read back. Every `cargo build`, `git log`, or `npm install` dumps thousands of tokens of noise into the context window. I built CCR to fix that transparently: it sits between your agent and your shell, compresses the output, and hands back only what the model needs. No config changes, no workflow changes — just less waste.
+
+---
+
+## What it does
+
+- Hooks into Claude Code, Cursor, Gemini CLI, Cline, and VS Code Copilot automatically after `ccr init`.
+- Filters build logs, test noise, and progress bars before the model ever sees them.
+- Uses BERT embeddings to match unknown commands to the closest handler — nothing falls through silently.
+- Caches repeated commands (git, kubectl, docker, terraform) so the model isn't re-reading stale output.
+- Runs 100% locally — no data leaves your machine.
+
+---
+
+## Token savings
 
 Numbers from `ccr/tests/handler_benchmarks.rs`. Run `cargo test -p ccr benchmark -- --nocapture` to reproduce, or `ccr gain` to see your own live data.
 
@@ -54,69 +93,20 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `cargo test -p ccr benchmark
 
 ---
 
-## How It Works
+## Compared to doing nothing
 
-```
-Claude runs: cargo build
-    ↓ PreToolUse hook rewrites to: ccr run cargo build
-    ↓ ccr executes cargo, filters output through Cargo handler
-    ↓ Claude reads: errors + warning count only (~87% fewer tokens)
-
-Claude runs: Read file.rs  (large file)
-    ↓ PostToolUse hook: BERT pipeline using current task as query
-    ↓ Claude reads: compressed file content focused on what's relevant
-
-Claude runs: git status  (seen recently)
-    ↓ Pre-run cache hit (same HEAD+staged+unstaged hash)
-    ↓ Claude reads: [PC: cached from 2m ago — ~1.8k tokens saved]
-```
-
-After `ccr init`, **this is fully automatic** — no changes to how you use your agent. CCR is local-only and never sends data anywhere.
-
----
-
-## Installation
-
-### Homebrew (macOS — recommended)
-
-```bash
-brew tap AssafWoo/ccr
-brew install ccr
-```
-
-`post_install` automatically runs `ccr init` (Claude Code) and `ccr init --agent cursor` (Cursor, if installed).
-
-### Script (Linux / any platform)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/AssafWoo/homebrew-ccr/main/install.sh | bash
-```
-
-Installs Rust if needed, builds from source, and runs `ccr init`.
-
-> **First run:** CCR downloads the BERT model (~90 MB, `all-MiniLM-L6-v2`) from HuggingFace and caches it at `~/.cache/huggingface/`. Subsequent runs are instant.
-
----
-
-## FAQ
-
-**Does CCR degrade Claude's output quality?**
-No. CCR only removes noise — build logs, module graphs, passing test lines, progress bars. Errors, file paths, and summaries are always kept.
-
-**What about tools CCR doesn't know?**
-BERT semantic routing matches against all known handlers. If confidence is high enough the closest handler applies; otherwise output passes through unchanged. CCR never silently drops output.
-
-**How do I verify it's working?**
-`ccr gain` after a session. To inspect what the model received from a specific command: `ccr proxy git log --oneline -20`.
-
-**Does CCR send any data outside my machine?**
-Never. All processing is fully local. BERT runs on-device.
+| Scenario | Without CCR | With CCR |
+|---|---|---|
+| `cargo build` (errors) | 1,923 tokens | 93 tokens |
+| `pytest` (all passing) | 3,818 tokens | 162 tokens |
+| `npm install` | 648 tokens | 25 tokens |
+| **Typical session** | **71k tokens** | **15k tokens** |
 
 ---
 
 ## Commands
 
-### ccr init
+**`ccr init`** — wire CCR into your agent's hooks:
 
 ```bash
 ccr init                              # Claude Code (default)
@@ -124,86 +114,27 @@ ccr init --agent cursor               # Cursor
 ccr init --agent gemini               # Gemini CLI
 ccr init --agent cline                # Cline (.clinerules in project dir)
 ccr init --agent copilot              # VS Code Copilot
-
 ccr init --uninstall                  # remove (add --agent <x> for specific agent)
 ```
 
-Safe to re-run — replaces existing CCR entries without touching other hooks. Writes an SHA-256 integrity baseline (see `ccr verify`).
-
-### ccr gain
+**`ccr gain`** — see your token savings:
 
 ```bash
 ccr gain                    # overall summary
 ccr gain --breakdown        # per-command table
 ccr gain --history          # last 14 days
-ccr gain --history --days 7
 ccr gain --insight          # categorized savings + top saves
-ccr gain --insight --days 7
 ```
 
-```
-CCR Token Savings
-═════════════════════════════════════════════════
-  Runs:           315  (avg 280ms)
-  Tokens saved:   32.9k / 71.1k  (46.3%)  ███████████░░░░░░░░░░░░░
-  Cost saved:     ~$0.099  (at $3.00/1M)
-  Today:          142 runs · 6.8k saved · 23.9%
-  Top command:    (pipeline)  65.2%  ·  25.8k saved
-```
+**`ccr doctor`** — diagnose the full installation in one command (run this first when something seems off).
 
-`--insight` breaks down *where* savings came from and surfaces the biggest individual wins:
-
-```
-Your token savings  (last 14 days)
-═══════════════════════════════════════════════════════
-
-  Noise reduction        1.74M   60%   ls × 144, find × 96
-  Build filtering         737k   25%   cargo × 210
-  Command compression     411k   14%   git × 159, grep × 136
-  Pipeline savings          5k    0%   (pipeline) × 248, incl. 61 cache hits
-
-  Top 5 saves:
-    find …/Desktop/ccr               Apr 05    747k
-    find …/Desktop/ccr               Apr 05    745k
-    grep …ccr-rewrite|.cursor/       Apr 01    177k
-    cargo build                      Mar 31    105k
-    git diff                         Mar 30     92k
-
-  Total saved: 2.90M
-```
-
-The four categories:
-- **Noise reduction** — `find`, `ls`, `tree` output that adds no signal
-- **Build filtering** — `cargo`, `go`, `npm`, `pytest`, `ember`, and other build/test/lint tools
-- **Pipeline savings** — Read, Glob, and Grep tool outputs filtered by CCR; cache hits
-- **Command compression** — everything else (`git`, `grep`, `docker`, `kubectl`, …)
-
-Analytics stored in SQLite (`~/.local/share/ccr/analytics.db`). Records older than 365 days are pruned automatically. Existing `analytics.jsonl` files are migrated on first run.
-
-Pricing uses `cost_per_million_tokens` from `ccr.toml` if set, otherwise `ANTHROPIC_MODEL` env var (Opus 4.6: $15, Sonnet 4.6: $3, Haiku 4.5: $0.80), otherwise $3.00.
-
-### ccr doctor
-
-Diagnoses the full installation in one command — run this first when something seems wrong:
-
-```bash
-ccr doctor
-```
-
-Checks: hook script exists and is executable · binary path in hook is valid · `settings.json` has PreToolUse + PostToolUse entries · `jq` is in PATH · analytics DB exists and is writable · record count (total + today) · end-to-end rewrite of `git status`.
-
-If `ccr gain` shows 0 runs and all doctor checks pass, the two most common causes are:
-1. **Commands were not run through Claude Code's AI** — hooks only fire when the AI runs tools, not when you type commands in your terminal.
-2. **Claude Code was not restarted** after `ccr init` — hooks in `settings.json` activate at session start.
-
-### Other commands
+**Other commands:**
 
 ```bash
 ccr verify                            # check hook integrity for all installed agents
 ccr discover                          # scan Claude history for commands that ran without CCR
 ccr noise                             # show learned noise patterns; --reset to clear
 ccr expand ZI_3                       # print original lines from a collapsed block
-ccr expand --list                     # list all available IDs in this session
 ccr read-file src/main.rs --level auto  # apply read-level filter and print savings
 ccr compress --scan-session           # compress current conversation context
 ccr filter --command cargo            # filter stdin as if it were cargo output
@@ -213,7 +144,8 @@ ccr proxy git status                  # run raw (no filtering), record analytics
 
 ---
 
-## Handlers
+<details>
+<summary><strong>Handlers (49 handlers)</strong></summary>
 
 49 handlers (60+ command aliases) in `ccr/src/handlers/`. Lookup cascade:
 
@@ -277,9 +209,10 @@ ccr proxy git status                  # run raw (no filtering), record analytics
 | **log** | `log` | Timestamp/UUID normalization, dedup `[×N]`, error summary block. |
 | **wget** | `wget` | Injects `--quiet` if no verbosity flag set. |
 
----
+</details>
 
-## Pipeline Architecture
+<details>
+<summary><strong>Pipeline architecture</strong></summary>
 
 ```
 0. Hard input ceiling (200k chars — truncates before any stage)
@@ -298,9 +231,10 @@ Outputs under 15 tokens skip the pipeline entirely. Step 6b falls back to head+t
 
 **Pre-run cache** (fires before execution): git, kubectl, docker, and terraform commands are hashed against live state. A hit skips execution entirely and returns the cached output with a `[PC: cached from Xm ago]` marker.
 
----
+</details>
 
-## Configuration
+<details>
+<summary><strong>Configuration</strong></summary>
 
 Config loaded from: `./ccr.toml` → `~/.config/ccr/config.toml` → embedded default.
 
@@ -337,9 +271,12 @@ patterns = [
 
 Pattern actions: `Remove`, `Collapse`, `ReplaceWith = "text"`, `TruncateLinesAt = N`, `HeadLines = N`, `TailLines = N`, `MatchOutput = "msg"`, `OnEmpty = "msg"`.
 
----
+Pricing uses `cost_per_million_tokens` from `ccr.toml` if set, otherwise `ANTHROPIC_MODEL` env var (Opus 4.6: $15, Sonnet 4.6: $3, Haiku 4.5: $0.80), otherwise $3.00.
 
-## User-Defined Filters
+</details>
+
+<details>
+<summary><strong>User-defined filters</strong></summary>
 
 Place `filters.toml` at `.ccr/filters.toml` (project-local) or `~/.config/ccr/filters.toml` (global). Project-local overrides global for the same key. Runs before any built-in handler.
 
@@ -357,9 +294,10 @@ message        = "ok — server ready"
 unless_pattern = "error"
 ```
 
----
+</details>
 
-## Session Intelligence
+<details>
+<summary><strong>Session intelligence</strong></summary>
 
 State tracked via `CCR_SESSION_ID=$PPID`, stored at `~/.local/share/ccr/sessions/<id>.json`.
 
@@ -369,9 +307,10 @@ State tracked via `CCR_SESSION_ID=$PPID`, stored at `~/.local/share/ccr/sessions
 - **Elastic context** — pipeline pressure scales with session size. At >80% pressure: `[⚠ context near full — run ccr compress --scan-session]`.
 - **Intent-aware query** — reads the agent's last message from the live session JSONL and uses it as the BERT query.
 
----
+</details>
 
-## Hook Architecture
+<details>
+<summary><strong>Hook architecture</strong></summary>
 
 | Agent | Config | Script |
 |-------|--------|--------|
@@ -389,9 +328,10 @@ All agents share the same binary and compression pipeline.
 
 **Hook integrity:** `ccr init` writes SHA-256 baselines (chmod 0o444). CCR verifies at every invocation and exits 1 with a warning if tampered. `ccr verify` checks all installed agents.
 
----
+</details>
 
-## Crate Overview
+<details>
+<summary><strong>Crate overview</strong></summary>
 
 ```
 ccr/        CLI binary — handlers, hooks, session state, commands
@@ -401,9 +341,10 @@ ccr-eval/   Evaluation suite — fixtures against Claude API
 config/     Embedded default filter patterns
 ```
 
----
+</details>
 
-## Uninstall
+<details>
+<summary><strong>Uninstall</strong></summary>
 
 ```bash
 ccr init --uninstall                        # Claude Code
@@ -412,18 +353,36 @@ ccr init --agent gemini --uninstall         # Gemini CLI
 ccr init --agent cline --uninstall          # Cline
 ccr init --agent copilot --uninstall        # VS Code Copilot
 
-brew uninstall ccr && brew untap AssafWoo/ccr   # Homebrew
+brew uninstall ccr && brew untap AssafWoo/pandafilter   # Homebrew
 # or: cargo uninstall ccr
 
 rm -rf ~/.local/share/ccr                   # analytics + sessions
 rm -rf ~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2
 ```
 
+</details>
+
+---
+
+## FAQ
+
+**Does CCR degrade Claude's output quality?**
+No. CCR only removes noise — build logs, module graphs, passing test lines, progress bars. Errors, file paths, and summaries are always kept.
+
+**What about tools CCR doesn't know?**
+BERT semantic routing matches against all known handlers. If confidence is high enough the closest handler applies; otherwise output passes through unchanged. CCR never silently drops output.
+
+**How do I verify it's working?**
+`ccr gain` after a session. To inspect what the model received from a specific command: `ccr proxy git log --oneline -20`.
+
+**Does CCR send any data outside my machine?**
+Never. All processing is fully local. BERT runs on-device.
+
 ---
 
 ## Contributing
 
-Open an issue or PR on [GitHub](https://github.com/AssafWoo/homebrew-ccr). To add a handler: implement the `Handler` trait and register it in `ccr/src/handlers/mod.rs` — see `git.rs` as a template.
+Open an issue or PR on [GitHub](https://github.com/AssafWoo/PandaFilter). To add a handler: implement the `Handler` trait and register it in `ccr/src/handlers/mod.rs` — see `git.rs` as a template.
 
 ---
 
