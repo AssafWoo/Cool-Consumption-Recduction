@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.jpg" alt="PandaFilter" width="160" />
+  <img src="assets/logo.png" alt="PandaFilter" width="160" />
 </p>
 
 <h1 align="center">PandaFilter</h1>
